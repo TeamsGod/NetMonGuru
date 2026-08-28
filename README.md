@@ -11,6 +11,8 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 sudo netmonguru        # sudo → every socket gets a process name
+
+Try netmonguru --demo first if you want to see it before granting root.
  
 ## Decisions taken with the user
 - **Interface**: terminal TUI (Textual), tabbed panes — not a web dashboard.
