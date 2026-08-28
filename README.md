@@ -5,8 +5,11 @@ btop-style network monitor for macOS, Python + Textual TUI. Delivered as
 
 ## To run it:
 unzip netmonguru.zip && cd netmonguru
+
 python3 -m venv .venv && source .venv/bin/activate
+
 pip install -e .
+
 sudo netmonguru        # sudo → every socket gets a process name
  
 ## Decisions taken with the user
