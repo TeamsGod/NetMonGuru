@@ -2,6 +2,12 @@
  
 btop-style network monitor for macOS, Python + Textual TUI. Delivered as
 `netmonguru.zip`. Current version: **1.1.0** (2026-08-28).
+
+## To run it:
+unzip netmonguru.zip && cd netmonguru
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+sudo netmonguru        # sudo → every socket gets a process name
  
 ## Decisions taken with the user
 - **Interface**: terminal TUI (Textual), tabbed panes — not a web dashboard.
