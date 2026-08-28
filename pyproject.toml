@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netmonguru"
+version = "1.1.0"
+description = "btop-style network monitor for macOS: sockets, world map and bandwidth"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Piotr Pawlik" }]
+keywords = ["network", "monitor", "tui", "macos", "netstat", "bandwidth"]
+dependencies = [
+    "textual>=0.60",
+    "psutil>=5.9",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+offline-geo = ["geoip2>=4.7"]
+
+[project.scripts]
+netmonguru = "netmonguru.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["netmonguru*"]

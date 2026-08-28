@@ -1,0 +1,218 @@
+Metadata-Version: 2.4
+Name: netmonguru
+Version: 1.1.0
+Summary: btop-style network monitor for macOS: sockets, world map and bandwidth
+Author: Piotr Pawlik
+License: MIT
+Keywords: network,monitor,tui,macos,netstat,bandwidth
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: textual>=0.60
+Requires-Dist: psutil>=5.9
+Requires-Dist: rich>=13.0
+Provides-Extra: offline-geo
+Requires-Dist: geoip2>=4.7; extra == "offline-geo"
+
+# NetMonGuru
+
+A btop-style network monitor for macOS, in the terminal. Five panes over one
+live picture of what your Mac is talking to:
+
+| Pane | Key | What it shows |
+|------|-----|---------------|
+| **Connections** | `1` | Every TCP/UDP socket: protocol, state, owning process, local → remote endpoint, hostname, owning organisation and geographic location. Filter by protocol, state, or free text. |
+| **Map** | `2` | A braille world map with one marker per remote location and arcs from your own location. **Click a marker** to highlight its arc and expand every connection to that place underneath. |
+| **Bandwidth** | `3` | btop-style download/upload graphs (auto-scaled, shared axis) over a 4-minute rolling window, plus a per-interface table with rates, totals and sparklines. |
+| **Processes** | `4` | Per-process view: throughput from `nettop`, socket counts, established connections, distinct peers and listening ports. |
+| **DNS** | `5` | Every name resolution as it happens — time, source, requesting process, type, query, answers — plus a rolling 15-minute cache keyed by name, and a resolutions-per-bucket graph. |
+
+## Install
+
+```bash
+cd netmonguru
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+netmonguru
+```
+
+Or without installing:
+
+```bash
+pip install -r requirements.txt
+python3 -m netmonguru
+```
+
+Requires Python 3.9+. Dependencies: `textual`, `rich`, `psutil` — all pure
+Python, no compiler needed.
+
+## Privileges
+
+macOS does not let an unprivileged process read another process's file table,
+so NetMonGuru merges two sources:
+
+* `lsof -i` — gives **process ownership**, but only for processes you may
+  inspect.
+* `netstat -an` — gives **every socket on the system**, but no ownership.
+
+Run it normally and you see all sockets, with process names filled in for your
+own processes and `?` for the rest. Run it with `sudo` and every row gets a
+process name:
+
+```bash
+sudo netmonguru
+```
+
+The status bar shows `unprivileged` when running without root, and which
+backends are active (`lsof+netstat`).
+
+## The map
+
+Markers are sized by how many sockets share a location and coloured to match
+the destination list on the right. Interaction:
+
+* **Click a marker** — selects it, draws its arc in full, and fills the panel
+  underneath with every socket to that location (process, pid, local → remote,
+  hostname).
+* **Click a row in the destination list** — same thing, from the keyboard side.
+* `,` / `.` — step through markers without the mouse.
+* `a` — hide/show the background arcs.
+* Hovering a marker shows a tooltip with its location and socket count.
+
+The home marker (`⌂`) is your own public location, resolved once at startup;
+with `--no-geo` or an offline database that has no answer for your address, the
+arcs are simply not drawn.
+
+## Watching DNS
+
+The DNS pane answers "what did this machine look up, and who asked for it".
+Three sources, picked automatically (`--dns-capture` overrides):
+
+| Mode | How | Needs | Sees |
+|------|-----|-------|------|
+| `log` | `log stream` filtered to `mDNSResponder` | nothing (more detail under `sudo`) | everything resolved through the system resolver, **with the requesting process** |
+| `pcap` | `tcpdump` on port 53 | root | plaintext DNS on the wire, including apps that bypass the system resolver |
+| `passive` | reverse (PTR) lookup of each new remote address | nothing | which names the addresses you talk to belong to |
+
+`passive` always runs alongside the others as a backstop, so the pane is never
+empty. A name observed being resolved always wins over a PTR guess, both in
+the cache and in the `HOST` column of the Connections pane.
+
+Everything is kept for **15 minutes** (`--dns-window SEC`) in memory only —
+nothing is written to disk. The cache table shows, per name: every address seen
+for it, how many times it was resolved, how long ago, and the TTL when the
+source reports one. `/` filters the live list and the cache together.
+
+Caveat worth knowing: DNS-over-HTTPS bypasses both `log` and `pcap`. A browser
+with DoH enabled will show connections whose names only the `passive` source
+can guess.
+
+## Geolocation and privacy
+
+Only **public, routable** addresses are ever looked up. Private, loopback,
+link-local and multicast addresses are labelled locally and never leave the
+machine. Results are cached in `~/.cache/netmonguru/geoip.json` for 30 days,
+so a typical session makes only a handful of requests.
+
+By default lookups go to `ip-api.com` (free, no key, batched, 15 requests per
+minute), with `ipwho.is` as an automatic fallback if that endpoint is blocked.
+Two alternatives:
+
+```bash
+netmonguru --no-geo                          # no outbound lookups at all
+netmonguru --mmdb ~/GeoLite2-City.mmdb \
+           --mmdb-asn ~/GeoLite2-ASN.mmdb    # fully offline (pip install netmonguru[offline-geo])
+```
+
+`--no-dns` additionally disables reverse-DNS resolution.
+
+## Keys
+
+```
+1 2 3 4 5  switch pane                 t / u   toggle TCP / UDP
+/          search (process, ip, port,  e       established only
+           country, org, hostname)     l       show/hide listening sockets
+s          cycle sort column           p       public destinations only
+r          reverse sort                a       toggle map arcs
+space      pause sampling              , .     previous / next map marker
+q          quit                        n       cycle bandwidth interface
+esc        clear search
+```
+
+## Command line
+
+```
+-i, --interval SEC     sampling interval (default 2.0)
+    --no-geo           never send addresses to a geolocation service
+    --no-dns           skip reverse DNS
+    --no-netstat       do not merge the system-wide netstat socket table
+    --no-proc-bw       disable per-process bandwidth (nettop)
+    --mmdb PATH        offline MaxMind GeoLite2-City database
+    --mmdb-asn PATH    optional GeoLite2-ASN database
+    --dns-capture M    auto | log | pcap | passive | off   (default: auto)
+    --dns-window SEC   DNS retention window (default 900 = 15 minutes)
+    --dns-iface IF     interface for --dns-capture pcap
+    --demo             synthetic data (useful for trying it off macOS)
+    --dump             print one plain-text sample and exit (scriptable)
+```
+
+`--dump` is handy in pipelines:
+
+```bash
+sudo netmonguru --dump | grep ESTABLISHED
+```
+
+## How it works
+
+```
+netmonguru/
+  core/
+    connections.py   lsof -F field parser + netstat parser + merge
+    bandwidth.py     psutil per-NIC counters → rates; nettop CSV parser
+    procs.py         groups sockets per process, joins nettop throughput
+    dnswatch.py      log stream / tcpdump / PTR sources → 15-min DNSCache
+    enrich.py        background geo/ASN worker with a 30-day disk cache
+    monitor.py       sampling thread producing immutable Snapshots
+    models.py        Connection / GeoInfo / NicSample / Snapshot
+  ui/
+    app.py           Textual application, five tabs over one snapshot
+    widgets/
+      braille.py     2×4 braille canvas: bitmap, line drawing, bar graphs
+      worldmap.py    projection, markers, arcs, hit-testing for clicks
+      graph.py       stacked bandwidth graph + single-series mini graph
+  data/
+    landmask.py      720×360 world land mask, zlib+base64, no runtime deps
+```
+
+Sampling runs on its own thread and publishes a `Snapshot`; the UI reads the
+latest snapshot at 2 Hz and never blocks on I/O. Geolocation runs on a third
+thread behind a queue and the DNS capture on a fourth, reading its subprocess
+line by line — a slow lookup service or a dead capture degrades to empty
+columns rather than a frozen UI.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests    # 37 parser / cache / aggregation tests
+python3 tests/smoke_ui.py                # headless UI run, writes screenshots/
+```
+
+The smoke test drives the real TUI through Textual's headless pilot: it clicks
+an actual map marker at its rendered coordinates and asserts the right
+connections were expanded, checks that a click on empty ocean is ignored, walks
+every pane, and exercises both search paths. Screenshots of each pane land in
+`screenshots/`.
+
+## Notes and limits
+
+* `nettop` reports throughput for processes you may inspect; run under `sudo`
+  for full coverage. If it is missing or restricted, the Processes pane still
+  shows socket ownership and the throughput columns read `-`.
+* `log stream` message formats differ between macOS releases. The parser keys
+  on the `<name> <TYPE> <value>` shape rather than a fixed layout, and the pane
+  reports which source is live plus any error; if it comes up empty on your
+  release, `--dns-capture pcap` (with `sudo`) is the fallback.
+* Map markers are bucketed to 0.1° so several peers in the same datacenter
+  share one dot; the detail panel lists every socket behind the dot.
+* IP geolocation is approximate by nature — city-level accuracy is typically
+  good for consumer ISPs and poor for cloud/CDN ranges (a Cloudflare address
+  will point at the anycast POP, not the origin).

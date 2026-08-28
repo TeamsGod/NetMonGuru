@@ -1,0 +1,6 @@
+textual>=0.60
+psutil>=5.9
+rich>=13.0
+
+[offline-geo]
+geoip2>=4.7
