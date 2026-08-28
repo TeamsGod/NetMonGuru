@@ -1,9 +1,10 @@
 # NetMonGuru — build notes
 
-![alt text](1-connections.png)
- 
 btop-style network monitor for macOS, Python + Textual TUI. Delivered as
 `netmonguru.zip`. Current version: **1.1.0** (2026-08-28).
+![alt text](1-connections.png)
+
+![alt text](2-map_1.png)
 
 ## To run it:
 unzip netmonguru.zip && cd netmonguru
