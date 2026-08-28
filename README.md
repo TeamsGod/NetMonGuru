@@ -1,5 +1,9 @@
 # NetMonGuru — build notes
 
+# sudo by me a coffee
+This tool has no telemetry, no ads, and no budget. Coffee helps.
+https://buycoffee.to/blackopsninja
+
 ```text
 ░█▀█░█▀▀░▀█▀░█▄█░█▀█░█▀█░█▀▀░█░█░█▀▄░█░█░░░█▀▄░█░█░░░█▀█░▀▀█░▀█▀░▀▀█░█▀▄
 ░█░█░█▀▀░░█░░█░█░█░█░█░█░█░█░█░█░█▀▄░█░█░░░█▀▄░░█░░░░█▀▀░░░█░░█░░░▀▄░█▀▄
