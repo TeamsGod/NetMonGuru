@@ -3,6 +3,14 @@
 ## 1.5.0 — 2026-09-20
 
 ### Added
+- **Windows build** in [`windows/`](windows/), feature-for-feature: sockets via
+  `psutil`, bandwidth per process / connection from TCP extended statistics,
+  live DNS from the DNS Client event log or cache polling, Authenticode and
+  Mark-of-the-Web instead of codesign / Gatekeeper, `SetTcpEntry` to close a
+  single connection at once, process-tree termination, a built-in whois
+  client, `%APPDATA%` / `%LOCALAPPDATA%` locations, `run.bat` launcher and
+  `--doctor` self-check. First release — not yet exercised on a real Windows
+  host; see its README.
 - **Processes pane on par with Connections.**
   - `TI` column: worst verdict among the process' peers; processes talking to
     a confirmed-malicious address are pinned first. `SIG` column: code

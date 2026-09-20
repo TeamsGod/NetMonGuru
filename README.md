@@ -9,6 +9,9 @@
 **Current version: 1.5.0** — see [CHANGELOG.md](CHANGELOG.md) for what is new.
 The previous release (1.1.0) is kept in [`old-version-V1/`](old-version-V1/).
 
+**Windows?** See [`windows/`](windows/) — the same 1.5.0 with Windows backends
+(double-click `run.bat`).
+
 ### sudo buy me a coffee
 This tool has no telemetry, no ads, and no budget. Coffee helps.
 Powered by curiosity, maintained on caffeine.

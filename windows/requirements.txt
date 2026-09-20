@@ -1,0 +1,3 @@
+textual>=0.60
+psutil>=5.9
+rich>=13.0
