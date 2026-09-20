@@ -6,7 +6,8 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-from .bandwidth import BandwidthCollector, ProcessNetCollector
+from .bandwidth import (BandwidthCollector, DemoNetCollector,
+                        ProcessNetCollector)
 from .connections import ConnectionCollector
 from .dnswatch import DEFAULT_WINDOW, DNSWatcher
 from .enrich import Enricher
@@ -26,7 +27,8 @@ class Monitor:
         self.demo = demo
         self.conns = ConnectionCollector(use_netstat=use_netstat)
         self.bw = BandwidthCollector()
-        self.procnet = ProcessNetCollector(enabled=per_process_bw)
+        self.procnet = DemoNetCollector() if demo else \
+            ProcessNetCollector(enabled=per_process_bw)
         self.dns = DNSWatcher(mode=dns_capture, window=dns_window,
                               interface=dns_iface)
         self.enricher = Enricher(enabled=geo, resolve_dns=dns,
@@ -82,7 +84,11 @@ class Monitor:
             backend = self.conns.backend
 
         nics = self.bw.collect()
-        procs: Dict[str, ProcNet] = self.procnet.collect()
+        if self.demo:
+            procs: Dict[str, ProcNet] = self.procnet.collect_for(
+                connections, self.interval)
+        else:
+            procs = self.procnet.collect()
         if self.procnet.error:
             errors.append(f"nettop: {self.procnet.error}")
 
@@ -113,6 +119,7 @@ class Monitor:
             connections=connections,
             nics=nics,
             procs=procs,
+            flows=dict(self.procnet.flows),
             geo=geo,
             dns_names=self.dns.cache.names(),
             ti=verdicts, procsig=procsig,

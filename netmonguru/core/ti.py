@@ -150,6 +150,18 @@ class Report:
     process: Optional[ProcSig] = None
     context: List[Tuple[str, str]] = field(default_factory=list)
     note: str = ""
+    kind: str = "ip"                # ip | process
+    #: process reports: every public peer with its local verdict ...
+    peers: List[Tuple[str, int, str, str, str]] = field(default_factory=list)
+    #  (ip, port, hostname, level, label)
+    #: ... and the full address investigations run for the worst of them
+    subs: List["Report"] = field(default_factory=list)
+
+    @property
+    def title(self) -> str:
+        if self.kind == "process":
+            return f"{self.pname or '?'} (pid {self.pid or '?'})"
+        return self.ip + (f":{self.port}" if self.port else "")
 
     @property
     def done(self) -> bool:
@@ -157,7 +169,8 @@ class Report:
 
     @property
     def pending(self) -> int:
-        return sum(1 for s in self.sources.values() if s.status == "pending")
+        return sum(1 for s in self.sources.values() if s.status == "pending") \
+            + sum(sub.pending for sub in self.subs)
 
     def overall(self) -> Tuple[str, List[str]]:
         """Worst verdict wins; the reasons say who claimed what."""
@@ -182,6 +195,29 @@ class Report:
                 + self.process.path_flags))
             if SEVERITY_RANK[level] < 2:
                 level = "suspicious"
+        if self.kind == "process":
+            investigated = {sub.ip for sub in self.subs}
+            for sub in self.subs:
+                sub_level, sub_reasons = sub.overall()
+                if sub_level in ("malicious", "suspicious"):
+                    reasons.append(f"talks to {sub.title} — {sub_level}: "
+                                   + "; ".join(sub_reasons[:2]))
+                    if SEVERITY_RANK[sub_level] > SEVERITY_RANK[level]:
+                        level = sub_level
+                if sub_level == "clean":
+                    answered += 1
+            for ip, port, _host, p_level, p_label in self.peers:
+                if ip in investigated:
+                    continue
+                if p_level in ("malicious", "suspicious"):
+                    reasons.append(f"talks to {ip}:{port} — {p_label}")
+                    if SEVERITY_RANK[p_level] > SEVERITY_RANK[level]:
+                        level = p_level
+            vt = self.sources.get("vt-file")
+            if vt is not None and vt.status in ("ok", "none"):
+                answered += 1
+            if self.process is not None and self.process.verdict == "clean":
+                answered += 1
         if level in ("", "info", "clean"):
             level = "clean" if answered else "unknown"
             if not answered:
@@ -193,8 +229,13 @@ class Report:
     def to_dict(self) -> dict:
         level, reasons = self.overall()
         return {
+            "kind": self.kind,
             "target": {"ip": self.ip, "port": self.port, "proto": self.proto,
                        "hostname": self.hostname},
+            "peers": [{"ip": ip, "port": port, "hostname": host,
+                       "level": lvl, "label": label}
+                      for ip, port, host, lvl, label in self.peers],
+            "peer_reports": [sub.to_dict() for sub in self.subs],
             "process": {"name": self.pname, "pid": self.pid,
                         **({k: v for k, v in asdict(self.process).items()
                             if k != "pid"} if self.process else {})},
@@ -209,8 +250,7 @@ class Report:
 
     def to_markdown(self) -> str:
         level, reasons = self.overall()
-        out = [f"# Threat-intel report: {self.ip}"
-               + (f":{self.port}" if self.port else ""), ""]
+        out = [f"# Threat-intel report: {self.title}", ""]
         out += [f"- **Verdict:** {level.upper()}",
                 f"- **Generated:** "
                 f"{time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime(self.started))}",
@@ -252,6 +292,18 @@ class Report:
                 if s.link:
                     out.append(f"- <{s.link}>")
                 out.append("")
+        if self.kind == "process":
+            out += ["## Remote peers", "",
+                    "| Address | Host | Local verdict |", "|---|---|---|"]
+            out += [f"| {ip}:{port} | {host or '-'} | "
+                    f"{(lvl or 'no data').upper()} {label} |"
+                    for ip, port, host, lvl, label in self.peers] or \
+                ["| - | - | no public peers |"]
+            out.append("")
+            for sub in self.subs:
+                out += ["---", "",
+                        sub.to_markdown().replace("\n## ", "\n### ")
+                        .replace("# Threat-intel report:", "## Peer", 1)]
         return "\n".join(out)
 
 
@@ -544,14 +596,87 @@ class ThreatIntel:
             v.investigated = level if level != "unknown" else ""
             v.recompute()
 
-    # -- export --------------------------------------------------------------------
+    # -- process investigation --------------------------------------------------
+    def investigate_process(self, pid: Optional[int], pname: str,
+                            peers: List[Tuple[str, int, str, str]],
+                            context: Optional[List[Tuple[str, str]]] = None,
+                            deep_peers: int = 3) -> Report:
+        """Everything about one process: binary trust (signature, Gatekeeper,
+        hash -> VirusTotal) plus its remote peers.  Every public peer gets its
+        local verdict; the ``deep_peers`` most suspect ones get a full address
+        investigation (kept small on purpose - free API quotas are tight)."""
+        report = Report(ip="", pid=pid, pname=pname, kind="process",
+                        context=list(context or []))
+        if not self.enabled:
+            report.note = "threat intelligence is disabled (--no-ti)"
+        seen = set()
+        ranked = []
+        for ip, port, proto, host in peers:
+            if ip in seen or not is_routable(ip):
+                continue
+            seen.add(ip)
+            v = self.verdicts.get(ip)
+            level, label = (v.level, v.label) if v is not None else ("", "")
+            if v is None and self.feeds is not None:
+                hits = self.feeds.lookup(ip, port)
+                if hits:
+                    level, label = hits[0].severity, hits[0].label
+            report.peers.append((ip, port, host, level, label))
+            ranked.append((-SEVERITY_RANK.get(level, 0), len(ranked),
+                           ip, port, proto, host))
+        report.peers.sort(key=lambda p: -SEVERITY_RANK.get(p[3], 0))
+        if self.enabled:
+            for _, _, ip, port, proto, host in sorted(ranked)[:deep_peers]:
+                report.subs.append(self.investigate(
+                    ip, port, proto, host, None, pname,
+                    [("investigated as", f"peer of {report.title}")]))
+            skipped = len(ranked) - len(report.subs)
+            if skipped > 0:
+                report.note = (f"{len(report.subs)} of {len(ranked)} peers "
+                               "fully investigated (worst first) - press i "
+                               "on a connection for any other")
+            if pid:
+                report.sources["vt-file"] = SourceResult(
+                    "vt-file", virustotal_file.title, "process")
+        self.reports.insert(0, report)
+        del self.reports[50:]
+        self._report_pool.submit(self._run_process_report, report)
+        return report
+
+    def _run_process_report(self, report: Report) -> None:
+        if report.pid:
+            try:
+                import psutil
+                exe = psutil.Process(report.pid).exe()
+            except Exception:                           # noqa: BLE001
+                exe = ""
+            report.process = self.signer.inspect(report.pid, exe, deep=True)
+            if "vt-file" in report.sources:
+                if report.process.sha256:
+                    report.sources["vt-file"] = virustotal_file(
+                        report.process.sha256,
+                        Ctx(keys=self.keys, http=self.http))
+                else:
+                    r = report.sources["vt-file"]
+                    r.status, r.headline = "skipped", \
+                        "binary could not be hashed"
+        deadline = time.time() + 120
+        while time.time() < deadline and not self._stop.is_set() \
+                and any(not sub.done for sub in report.subs):
+            time.sleep(0.2)
+        report.finished = time.time()
+
+    # -- export to disk ---
     def export(self, report: Report, directory: Optional[Path] = None
                ) -> Tuple[Path, Path]:
         directory = Path(directory) if directory else \
             Path.home() / "netmonguru-reports"
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(report.started))
-        stem = f"{report.ip.replace(':', '_')}-{stamp}"
+        import re as _re
+        name = report.ip if report.kind == "ip" else \
+            f"process-{report.pname}-{report.pid}"
+        stem = f"{_re.sub(r'[^A-Za-z0-9._-]+', '_', name)}-{stamp}"
         md, js = directory / f"{stem}.md", directory / f"{stem}.json"
         md.write_text(report.to_markdown(), "utf-8")
         js.write_text(json.dumps(report.to_dict(), indent=2, default=str),

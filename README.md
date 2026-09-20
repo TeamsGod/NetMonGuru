@@ -6,7 +6,7 @@
 ░▀░▀░▀▀▀░░▀░░▀░▀░▀▀▀░▀░▀░▀▀▀░▀▀▀░▀░▀░▀▀▀░░░▀▀░░░▀░░░░▀░░░▀▀░░░▀░░▀▀░░▀░▀
 ```
 
-**Current version: 1.3.0** — see [CHANGELOG.md](CHANGELOG.md) for what is new.
+**Current version: 1.5.0** — see [CHANGELOG.md](CHANGELOG.md) for what is new.
 The previous release (1.1.0) is kept in [`old-version-V1/`](old-version-V1/).
 
 ### sudo buy me a coffee
@@ -28,8 +28,8 @@ live picture of what your Mac is talking to:
 |------|-----|---------------|
 | **Connections** | `1` | Every TCP/UDP socket: protocol, state, owning process, local → remote endpoint, hostname, owning organisation and geographic location. Filter by protocol, state, or free text. New sockets always appear at the top, flagged `NEW`. **Click a row (or press Enter)** to expand full details with the related processes; `m` marks rows, `f` sends them to the Monitor. |
 | **Map** | `2` | A braille world map with one marker per remote location and arcs from your own location. **Click a marker** to highlight its arc and expand every connection to that place underneath. |
-| **Bandwidth** | `3` | btop-style download/upload graphs (auto-scaled, shared axis) over a 4-minute rolling window, plus a per-interface table with rates, totals and sparklines. |
-| **Processes** | `4` | Per-process view: throughput from `nettop`, socket counts, established connections, distinct peers and listening ports. |
+| **Bandwidth** | `3` | btop-style download/upload graph over a 4-minute rolling window with three views — **per process** (default), **per connection**, per interface. The graph follows the selected row; `Enter` on a process filters down to its connections, `/` filters by name, address or hostname. |
+| **Processes** | `4` | Per-process view: throughput from `nettop`, socket counts, established connections, distinct peers and listening ports, plus a `TI` column (worst verdict among the process' peers) and `SIG` (who signed the binary). **Click a row** for process details and its connections; `i` investigates the whole process, `P` monitors it, `k` terminates it. |
 | **DNS** | `5` | Every name resolution as it happens — time, source, requesting process, type, query, answers — plus a rolling 15-minute cache keyed by name, and a resolutions-per-bucket graph. |
 | **Intel** | `7` | Threat intelligence: on-demand investigation of an address (reputation sources, WHOIS/RDAP, OSINT, owning process), history of investigations, state of the local feeds. |
 | **Monitor** | `6` | Only the traffic you chose to watch: the rules you created from marked connections, every live socket that matches them (new on top) and a history of the ones that have closed. |
@@ -238,6 +238,49 @@ or export `ABUSEIPDB_KEY`, `VT_API_KEY`, `ABUSECH_AUTH_KEY`, `OTX_API_KEY`,
 `GREYNOISE_KEY`. Note that VirusTotal's *public* key is licensed for
 non-commercial use only. `--no-ti` disables the whole subsystem.
 
+## Investigating a process
+
+The Processes pane offers the same tools as Connections, aimed at the process:
+
+* **`TI` column** — the worst verdict among everything the process talks to
+  (`C2 Emotet (+1 peer)`, `DROP`, `ok`…). A process with a confirmed-malicious
+  peer is pinned to the top. **`SIG`** shows the code signature.
+* **Click / `Enter`** opens the detail panel: executable, user, parent,
+  uptime, memory, command line, signature and launch-path flags, traffic,
+  sockets and listening ports, which peers are flagged — and on the right every
+  connection of the process with its own TI label, flagged ones first. `Tab`
+  moves into that list: `Enter` opens the connection in the Connections pane,
+  `i` investigates that single address.
+* **`i`** builds a *process report* in the Intel pane: signature verification,
+  Gatekeeper, SHA-256 → VirusTotal, local context (user, command line, parent,
+  names resolved), the full list of public peers with their local verdict, and
+  a complete TI + WHOIS + OSINT investigation of the three most suspect peers
+  (worst first — the cap keeps you inside free API quotas; any other peer is
+  one `i` away). `w` exports it with the peer reports embedded.
+* **`P`** (or `f`) adds a whole-process rule to the Monitor, **`k`**
+  terminates / force-kills the process, `/` filters by name, PID or TI label.
+
+## Bandwidth per process and per connection
+
+The Bandwidth pane opens on **processes**: every process with network
+activity, busiest first, with its current down/up rate, share of the total,
+bytes received/sent, socket count and a sparkline. The big graph always shows
+the row under the cursor — leave it on *all processes* for the machine total.
+
+* `Enter` on a process switches to **connections** filtered to that process;
+  the graph then shows the process total, or a single connection when you move
+  onto one. `Esc` goes back to all processes.
+* `Enter` on a connection opens it in the Connections pane with full details
+  (from there `i` investigates it, `k` ends it, `f` monitors it).
+* `b` cycles processes → connections (all) → interfaces; `/` filters the rows
+  by process name, PID, address or hostname.
+* `netmonguru --bw-view connections` (or `interfaces`) changes the view the
+  pane starts with.
+
+The numbers come from macOS `nettop`, sampled once per interval: cumulative
+byte counters per process and per socket, turned into rates between our own
+samples. Without `sudo` nettop only reports processes you own.
+
 ## Ending a connection
 
 Press `k` on a connection (Connections, Monitor or the Map detail table). A
@@ -274,7 +317,9 @@ s          cycle sort (Newest first…)  t / u   toggle TCP / UDP
                                        p       public destinations only
 r          reverse sort                a       toggle map arcs
 space      pause sampling              , .     previous / next map marker
-q          quit                        n       cycle bandwidth interface
+q          quit                        n       (Bandwidth) next row
+b            (Bandwidth) switch view: processes / connections / interfaces
+enter        (Bandwidth) process → its connections; connection → its details
 esc        clear search
 ```
 
@@ -284,6 +329,8 @@ esc        clear search
 -i, --interval SEC     sampling interval (default 2.0)
     --no-geo           never send addresses to a geolocation service
     --no-dns           skip reverse DNS
+    --bw-view VIEW     what the Bandwidth pane opens with: processes (default),
+                       connections or interfaces
     --no-ti            no threat intelligence at all (no feed downloads, no lookups)
     --no-ti-auto       feeds + manual investigation only; never auto-query AbuseIPDB
     --no-netstat       do not merge the system-wide netstat socket table
@@ -334,10 +381,12 @@ columns rather than a frozen UI.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests    # 80 parser / cache / monitor / kill / threat-intel tests
+python3 -m unittest discover -s tests    # 86 parser / cache / monitor / kill / threat-intel / flow tests
 python3 tests/smoke_ui.py                # headless UI run, writes screenshots/
 python3 tests/smoke_monitor.py           # scrolling, new-on-top, details, marking, Monitor pane
 python3 tests/smoke_intel.py             # TI column, investigation, Intel pane (canned upstream answers)
+python3 tests/smoke_bandwidth.py         # per-process / per-connection bandwidth views
+python3 tests/smoke_processes.py         # Processes pane: TI, details, process investigation
 ```
 
 The smoke test drives the real TUI through Textual's headless pilot: it clicks

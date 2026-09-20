@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.5.0 — 2026-09-20
+
+### Added
+- **Processes pane on par with Connections.**
+  - `TI` column: worst verdict among the process' peers; processes talking to
+    a confirmed-malicious address are pinned first. `SIG` column: code
+    signature of the binary.
+  - Detail panel on click / `Enter`: executable, user, parent, uptime, memory,
+    command line, signature, launch-path flags, traffic, sockets, listening
+    ports, flagged peers, and the list of the process' connections with a TI
+    label each (flagged first). From that list `Enter` opens the connection,
+    `i` investigates the address.
+  - `i` — **process investigation** in the Intel pane: signature verification,
+    Gatekeeper, SHA-256 → VirusTotal, local context, all public peers with
+    their local verdict, and a full TI + WHOIS + OSINT report for the three
+    most suspect peers. Exported reports embed the peer reports.
+  - `P` / `f` monitor the whole process, `k` terminates or force-kills it,
+    `/` filters by name, PID or TI label.
+
+## 1.4.0 — 2026-09-20
+
+### Added
+- **Bandwidth per process and per connection.** The Bandwidth pane has three
+  views — processes, connections, interfaces — switched with `b`. The graph
+  follows the selected row, so any process or single connection can be graphed
+  over the 4-minute window. `Enter` on a process filters down to its
+  connections, `Enter` on a connection opens its details, `Esc` goes back,
+  `/` filters rows by process, PID, address or hostname.
+- `--bw-view processes|connections|interfaces` selects the starting view.
+- Per-connection throughput from `nettop`'s full listing (one call now yields
+  both process and socket counters), with a rolling history per process and
+  per socket. `--demo` generates synthetic traffic so the views can be tried
+  anywhere.
+
+### Changed
+- **The Bandwidth pane now opens per process by default** (was: per
+  interface).
+
+### Fixed
+- `nettop` output with a leading timestamp column (current macOS layout) had
+  the timestamp read as the process label, which produced bogus process names
+  in the Processes pane. Both layouts are handled now.
+
 ## 1.3.0 — 2026-09-20
 
 ### Added

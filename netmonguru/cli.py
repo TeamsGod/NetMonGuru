@@ -41,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dns-iface", default="", metavar="IF",
                    help="interface for --dns-capture pcap "
                         "(default: the system's primary interface)")
+    p.add_argument("--bw-view", default="processes",
+                   choices=["processes", "connections", "interfaces"],
+                   help="what the Bandwidth pane opens with "
+                        "(default: processes)")
     p.add_argument("--no-ti", action="store_true",
                    help="disable threat intelligence completely (no feed "
                         "downloads, no lookups)")
@@ -81,7 +85,7 @@ def main(argv=None) -> int:
 
     from .ui.app import NetMonGuruApp
 
-    app = NetMonGuruApp(monitor)
+    app = NetMonGuruApp(monitor, bw_view=args.bw_view)
     try:
         app.run()
     finally:

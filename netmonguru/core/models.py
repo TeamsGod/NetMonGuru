@@ -141,6 +141,33 @@ class ProcNet:
     conns: int = 0
 
 
+@dataclass(slots=True)
+class FlowNet:
+    """Per-connection throughput (macOS ``nettop`` full listing)."""
+
+    key: str
+    proto: str
+    family: str
+    laddr: str
+    lport: int
+    raddr: str
+    rport: int
+    pid: Optional[int] = None
+    pname: str = ""
+    bytes_in: int = 0
+    bytes_out: int = 0
+    in_rate: float = 0.0
+    out_rate: float = 0.0
+
+    @property
+    def local(self) -> str:
+        return _fmt_endpoint(self.laddr, self.lport)
+
+    @property
+    def remote(self) -> str:
+        return _fmt_endpoint(self.raddr, self.rport)
+
+
 # ---------------------------------------------------------------------------
 # Snapshot handed to the UI
 # ---------------------------------------------------------------------------
@@ -150,6 +177,7 @@ class Snapshot:
     connections: List[Connection] = field(default_factory=list)
     nics: Dict[str, NicSample] = field(default_factory=dict)
     procs: Dict[str, ProcNet] = field(default_factory=dict)
+    flows: Dict[str, FlowNet] = field(default_factory=dict)
     geo: Dict[str, GeoInfo] = field(default_factory=dict)
     dns_names: Dict[str, str] = field(default_factory=dict)
     ti: Dict[str, object] = field(default_factory=dict)       # ip -> Verdict

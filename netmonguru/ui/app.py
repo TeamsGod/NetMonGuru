@@ -52,7 +52,7 @@ SORTS = [("newest", "Newest"), ("process", "Process"), ("proto", "Proto"), ("sta
 TAB_FOCUS = {
     "tab-conn": "#conn-table",
     "tab-map": "#worldmap",
-    "tab-bw": "#nic-table",
+    "tab-bw": "#bw-table",
     "tab-proc": "#proc-table",
     "tab-dns": "#dns-live",
     "tab-mon": "#mon-table",
@@ -71,6 +71,16 @@ SIG_STYLES = {"apple": "#5f875f", "appstore": "#5f875f", "devid": "#5f875f",
               "invalid": "bold #ff5f5f", "unknown": "#4a5a6a"}
 STATUS_STYLES = {"ok": "#5fff87", "pending": "#ffd75f", "skipped": "#4a5a6a",
                  "error": "#ff5f5f", "limited": "#ffaf5f", "none": "#7a8a99"}
+
+BW_VIEWS = ("processes", "connections", "interfaces")
+BW_COLUMNS = {
+    "processes": ("PID", "PROCESS", "DOWN", "UP", "SHARE", "RECV", "SENT",
+                  "CONNS", "HISTORY"),
+    "connections": ("PROCESS", "PID", "PROTO", "LOCAL", "REMOTE", "HOST",
+                    "DOWN", "UP", "RECV", "SENT", "HISTORY"),
+    "interfaces": ("IFACE", "DOWN", "UP", "RECV", "SENT", "HISTORY"),
+}
+ALL_KEY = "__all__"
 
 SCOPE_STYLES = {"endpoint": "#5fd7ff", "host": "#ffd75f",
                 "process": "#af87ff", "listen": "#5fff87"}
@@ -200,7 +210,8 @@ class KillScreen(ModalScreen):
         t.append(" END CONNECTION \n\n", style="bold #06090c on #ff5f5f")
         t.append(f" {c.pname or '?'} ", style="bold #e6edf3")
         t.append(f"(pid {c.pid or '?'})   ", style="#7a8a99")
-        t.append(f"{c.local} → {c.remote}", style="#c8d3de")
+        t.append(f"{c.local} → {c.remote}" if c.proto else "whole process",
+                 style="#c8d3de")
         if self.host:
             t.append(f"   {self.host}", style="#7fb3d5")
         t.append(f"   {c.proto} {c.state}\n\n", style="#9fb0c0")
@@ -296,11 +307,22 @@ class NetMonGuruApp(App):
     #intel-feeds { height: 11; }
     #intel-scroll { width: 1fr; height: 1fr; padding: 0 1; }
     #intel-report { height: auto; }
+    #proc-bar { height: 1; background: #0c1116; color: #7a8a99; padding: 0 1; }
+    #proc-detail {
+        display: none; height: 18; background: #0a0f14;
+        border-top: heavy #2b6a94;
+    }
+    #proc-detail.open { display: block; }
+    #pd-info { width: 1fr; height: 1fr; padding: 0 1; overflow-y: auto; }
+    #pd-side { width: 1fr; height: 1fr; border-left: solid #1f2b36; }
+    #pd-conns { height: 1fr; }
     #mon-status { height: 1; background: #0c1116; padding: 0 1; }
     #mon-rules { height: 9; }
     #mon-empty { height: auto; padding: 1 2; color: #7a8a99; }
     #mon-empty.hidden { display: none; }
-    #nic-table { height: 12; }
+    #bw-table { height: 1fr; }
+    #bw-graph { height: 14; }
+    #bw-bar { height: 1; background: #0c1116; padding: 0 1; }
     #dns-status { height: 1; background: #0c1116; padding: 0 1; }
     #dns-rate { height: 5; }
     #dns-cache { height: 14; }
@@ -346,13 +368,15 @@ class NetMonGuruApp(App):
         Binding("space", "toggle_pause", "Pause"),
         Binding("r", "reverse_sort", "Reverse", show=False),
         Binding("a", "toggle_arcs", "Arcs", show=False),
-        Binding("n", "cycle_nic", "Interface", show=False),
+        Binding("n", "cycle_nic", "Next row", show=False),
+        Binding("b", "bw_view", "Bw view", show=False),
         Binding("comma", "map_prev", "Prev marker", show=False),
         Binding("full_stop", "map_next", "Next marker", show=False),
         Binding("escape", "clear_search", "Clear", show=False),
     ]
 
-    def __init__(self, monitor: Monitor, rules_path=DEFAULT_RULES_PATH) -> None:
+    def __init__(self, monitor: Monitor, rules_path=DEFAULT_RULES_PATH,
+                 bw_view: str = "processes") -> None:
         super().__init__()
         self.monitor = monitor
         self.seen = SeenIndex()
@@ -361,6 +385,9 @@ class NetMonGuruApp(App):
         self.cutter = PfCutter()
         self.ti = monitor.ti
         self.intel_rows: List = []
+        self.proc_detail_open = False
+        self.proc_detail_row: Optional[ProcRow] = None
+        self.proc_detail_conns: List[Tuple[str, Connection]] = []
         self._intel_sig = None
         self.keyed: List[Tuple[str, Connection]] = []
         self.row_keys: List[str] = []
@@ -384,7 +411,10 @@ class NetMonGuruApp(App):
         self.search_term = ""
         self.sort_idx = 0
         self.sort_reverse = False
-        self.nic_choice = "total"
+        self.bw_view = bw_view if bw_view in BW_VIEWS else "processes"
+        self.bw_process: Optional[Tuple[Optional[int], str]] = None  # drill-down
+        self.bw_keys: List[str] = []
+        self._bw_columns_for = ""
         self.rows: List[Connection] = []
         self.map_points: List[MapPoint] = []
         self.map_detail_rows: List[Connection] = []
@@ -426,13 +456,22 @@ class NetMonGuruApp(App):
                         yield DataTable(id="geo-table", zebra_stripes=True,
                                         cursor_type="row")
             with TabPane("Bandwidth", id="tab-bw"):
+                yield Static("", id="bw-bar")
                 yield BandwidthGraph(id="bw-graph")
-                yield DataTable(id="nic-table", zebra_stripes=True,
+                yield ClickTable(id="bw-table", zebra_stripes=True,
                                 cursor_type="row")
             with TabPane("Processes", id="tab-proc"):
                 yield Static("", id="proc-note", classes="note")
-                yield DataTable(id="proc-table", zebra_stripes=True,
-                                cursor_type="row")
+                yield Static("", id="proc-bar")
+                yield ClickTable(id="proc-table", zebra_stripes=True,
+                                 cursor_type="row")
+                with Horizontal(id="proc-detail"):
+                    yield Static("", id="pd-info")
+                    with Vertical(id="pd-side"):
+                        yield Static(" CONNECTIONS OF THIS PROCESS",
+                                     id="pd-conns-title", classes="pane-title")
+                        yield ClickTable(id="pd-conns", zebra_stripes=True,
+                                         cursor_type="row")
             with TabPane("DNS", id="tab-dns"):
                 yield Static("", id="dns-status")
                 yield MiniGraph(color="#af87ff", id="dns-rate")
@@ -499,10 +538,11 @@ class NetMonGuruApp(App):
         md = self.query_one("#map-detail", DataTable)
         md.add_columns("PROTO", "STATE", "PID", "PROCESS", "LOCAL",
                        "REMOTE", "HOSTNAME")
-        nt = self.query_one("#nic-table", DataTable)
-        nt.add_columns("IFACE", "DOWN", "UP", "RECV", "SENT", "HISTORY")
-        self._columns("#proc-table", "PID", "PROCESS", "DOWN", "UP", "IN",
-                      "OUT", "SOCKETS", "ESTAB", "PEERS", "LISTENING")
+        self._columns("#proc-table", "PID", "PROCESS", "TI", "SIG", "DOWN",
+                      "UP", "IN", "OUT", "SOCKETS", "ESTAB", "PEERS",
+                      "LISTENING")
+        self._columns("#pd-conns", "TI", "PROTO", "STATE", "REMOTE", "HOST",
+                      "LOCATION", "DOWN", "UP")
         dl = self.query_one("#dns-live", DataTable)
         dl.add_columns("TIME", "SRC", "CLIENT", "TYPE", "QUERY", "ANSWERS")
         dc = self.query_one("#dns-cache", DataTable)
@@ -1154,42 +1194,166 @@ class NetMonGuruApp(App):
         self._render_map_detail()
 
     # -- bandwidth ---------------------------------------------------------
+    def _bw_match(self, *fields: str) -> bool:
+        return (not self.search_term or
+                self.search_term.lower() in " ".join(fields).lower())
+
     def _render_bandwidth(self) -> None:
         snap = self.snapshot
         graph = self._find("#bw-graph", BandwidthGraph)
-        table = self._find("#nic-table", DataTable)
-        if graph is None or table is None:
+        table = self._find("#bw-table", DataTable)
+        bar = self._find("#bw-bar", Static)
+        if graph is None or table is None or bar is None:
             return
-        if self.nic_choice == "total" or self.nic_choice not in snap.nics:
-            graph.update_series("all interfaces", snap.down_history,
-                                snap.up_history)
-        else:
-            nic = snap.nics[self.nic_choice]
-            graph.update_series(nic.name, nic.down_history, nic.up_history)
+        view = self.bw_view
+        if self._bw_columns_for != view:        # different columns per view
+            table.clear(columns=True)
+            self._tables.pop(table.id, None)
+            self._columns("#bw-table", *BW_COLUMNS[view])
+            self._bw_columns_for = view
 
-        cursor = table.cursor_row
-        table.clear()
-        table.add_row(Text("total", style="bold #e6edf3"),
-                      Text(human_rate(snap.total_down), style="#5fd7ff"),
-                      Text(human_rate(snap.total_up), style="#ffaf5f"),
-                      Text(human_bytes(sum(n.bytes_recv
-                                           for n in snap.nics.values())),
-                           style="#9fb0c0"),
-                      Text(human_bytes(sum(n.bytes_sent
-                                           for n in snap.nics.values())),
-                           style="#9fb0c0"),
-                      Text(sparkline(snap.down_history, 24), style="#5fd7ff"))
-        for name in sorted(snap.nics):
-            n = snap.nics[name]
-            marker = "▸ " if name == self.nic_choice else "  "
-            table.add_row(Text(marker + n.name, style="#e6edf3"),
-                          Text(human_rate(n.down_rate), style="#5fd7ff"),
-                          Text(human_rate(n.up_rate), style="#ffaf5f"),
-                          Text(human_bytes(n.bytes_recv), style="#9fb0c0"),
-                          Text(human_bytes(n.bytes_sent), style="#9fb0c0"),
-                          Text(sparkline(n.down_history, 24), style="#5fd7ff"))
-        if cursor:
-            table.move_cursor(row=min(cursor, len(snap.nics)))
+        net = self.monitor.procnet
+        total_rate = max(1.0, snap.total_down + snap.total_up)
+        items: List[Tuple[str, List[Text]]] = []
+        series: Dict[str, Tuple[str, List[float], List[float]]] = {
+            ALL_KEY: ("all traffic", snap.down_history, snap.up_history)}
+
+        def rate(v: float, style: str) -> Text:
+            return Text(f"{human_rate(v) if v else '-':>10}", style=style)
+
+        if view == "processes":
+            rows = [(k, p) for k, p in snap.procs.items()
+                    if self._bw_match(p.name, str(p.pid or ""))]
+            rows.sort(key=lambda kp: (-(kp[1].in_rate + kp[1].out_rate),
+                                      -(kp[1].bytes_in + kp[1].bytes_out),
+                                      kp[1].name.lower()))
+            items.append((ALL_KEY, [
+                Text("", style="#7a8a99"),
+                Text("all processes", style="bold #e6edf3"),
+                rate(snap.total_down, "#5fd7ff"), rate(snap.total_up, "#ffaf5f"),
+                Text("100%", style="#7a8a99"), Text(""), Text(""),
+                Text(str(sum(1 for c in snap.connections if c.raddr)),
+                     style="#c8d3de"),
+                Text(sparkline(snap.down_history, 24), style="#5fd7ff")]))
+            for key, p in rows[:300]:
+                down, up = net.proc_history(key)
+                series[key] = (f"{p.name} (pid {p.pid or '?'})", down, up)
+                share = (p.in_rate + p.out_rate) / total_rate
+                items.append((key, [
+                    Text(str(p.pid if p.pid is not None else "-"),
+                         style="#7a8a99"),
+                    Text(p.name[:28], style="#e6edf3"),
+                    rate(p.in_rate, "#5fd7ff"), rate(p.out_rate, "#ffaf5f"),
+                    Text(f"{min(share, 9.99):>4.0%}" if share >= 0.005 else "",
+                         style="#c6a15b"),
+                    Text(f"{human_bytes(p.bytes_in):>8}", style="#9fb0c0"),
+                    Text(f"{human_bytes(p.bytes_out):>8}", style="#9fb0c0"),
+                    Text(str(p.conns or "-"), style="#c8d3de"),
+                    Text(sparkline(down, 24), style="#5fd7ff")]))
+
+        elif view == "connections":
+            rows = list(snap.flows.values())
+            if self.bw_process is not None:
+                pid, name = self.bw_process
+                rows = [f for f in rows if (f.pid == pid if pid is not None
+                                            else f.pname == name)]
+            rows = [f for f in rows if self._bw_match(
+                f.pname, str(f.pid or ""), f.local, f.remote,
+                self._hostname(f.raddr))]
+            rows.sort(key=lambda f: (-(f.in_rate + f.out_rate),
+                                     -(f.bytes_in + f.bytes_out), f.key))
+            label = (f"all connections of {self.bw_process[1]}"
+                     if self.bw_process else "all connections")
+            if self.bw_process is not None:
+                # the drill-down total is the sum of that process' flows
+                pk = next((k for k, p in snap.procs.items()
+                           if (p.pid, p.name) == self.bw_process
+                           or (self.bw_process[0] is not None
+                               and p.pid == self.bw_process[0])), None)
+                if pk is not None:
+                    series[ALL_KEY] = (label,) + net.proc_history(pk)
+            items.append((ALL_KEY, [
+                Text(label[:28], style="bold #e6edf3"), Text(""), Text(""),
+                Text(""), Text(""), Text(""),
+                rate(sum(f.in_rate for f in rows), "#5fd7ff"),
+                rate(sum(f.out_rate for f in rows), "#ffaf5f"),
+                Text(""), Text(""), Text("")]))
+            for f in rows[:400]:
+                down, up = net.flow_history(f.key)
+                series[f.key] = (f"{f.pname or '?'}  {f.local} → {f.remote}",
+                                 down, up)
+                items.append((f.key, [
+                    Text((f.pname or "?")[:22], style="#e6edf3"),
+                    Text(str(f.pid if f.pid is not None else "-"),
+                         style="#7a8a99"),
+                    Text(f.proto + ("6" if f.family == "IPv6" else ""),
+                         style="#87d7ff" if f.proto == "TCP" else "#d7afff"),
+                    Text(f.local, style="#9fb0c0"),
+                    Text(f.remote, style="#c8d3de" if f.raddr else "#4a5a6a"),
+                    Text(self._hostname(f.raddr)[:30], style="#7fb3d5"),
+                    rate(f.in_rate, "#5fd7ff"), rate(f.out_rate, "#ffaf5f"),
+                    Text(f"{human_bytes(f.bytes_in):>8}", style="#9fb0c0"),
+                    Text(f"{human_bytes(f.bytes_out):>8}", style="#9fb0c0"),
+                    Text(sparkline(down, 20), style="#5fd7ff")]))
+
+        else:                                                   # interfaces
+            items.append((ALL_KEY, [
+                Text("all interfaces", style="bold #e6edf3"),
+                rate(snap.total_down, "#5fd7ff"), rate(snap.total_up, "#ffaf5f"),
+                Text(human_bytes(sum(n.bytes_recv for n in snap.nics.values())),
+                     style="#9fb0c0"),
+                Text(human_bytes(sum(n.bytes_sent for n in snap.nics.values())),
+                     style="#9fb0c0"),
+                Text(sparkline(snap.down_history, 24), style="#5fd7ff")]))
+            for name in sorted(snap.nics):
+                n = snap.nics[name]
+                if not self._bw_match(name):
+                    continue
+                series[name] = (n.name, n.down_history, n.up_history)
+                items.append((name, [
+                    Text(n.name, style="#e6edf3"),
+                    rate(n.down_rate, "#5fd7ff"), rate(n.up_rate, "#ffaf5f"),
+                    Text(human_bytes(n.bytes_recv), style="#9fb0c0"),
+                    Text(human_bytes(n.bytes_sent), style="#9fb0c0"),
+                    Text(sparkline(n.down_history, 24), style="#5fd7ff")]))
+
+        self.bw_keys = [k for k, _ in items]
+        self._sync_table(table, items)
+
+        # the graph shows whatever row the cursor is on
+        chosen = self._table_key(table) or ALL_KEY
+        title, down, up = series.get(chosen, series[ALL_KEY])
+        graph.update_series(title, down, up)
+
+        t = Text()
+        for v in BW_VIEWS:
+            t.append(f" {v.upper()} ", style="bold #06090c on #5fd7ff"
+                     if v == view else "#4a5a6a")
+            t.append(" ")
+        t.append(" b: switch view ", style="#4a5a6a")
+        if self.bw_process is not None and view == "connections":
+            t.append(f" process: {self.bw_process[1]} ",
+                     style="bold #06090c on #ffd75f")
+            t.append(" esc: all processes ", style="#4a5a6a")
+        elif view == "processes":
+            t.append(" enter: connections of the process ", style="#4a5a6a")
+        if self.search_term:
+            t.append(f" /{self.search_term} ", style="bold #ffd75f")
+        else:
+            t.append(" /: filter ", style="#4a5a6a")
+        t.append(f"  graph: {title[:60]}", style="#9fb0c0")
+        if view != "interfaces" and len(items) <= 1:
+            if not net.available:
+                note = "nettop not found — per-process data is macOS only"
+            elif not net.enabled:
+                note = f"per-process bandwidth is off ({net.error or 'disabled'})"
+            elif view == "connections" and snap.procs:
+                note = ("nettop gave no per-connection rows on this system — "
+                        "the per-process view still works")
+            else:
+                note = "waiting for the first nettop samples…"
+            t.append(f"   {note}", style="#ffaf5f")
+        bar.update(t)
 
     # -- processes ---------------------------------------------------------
     def _render_processes(self) -> None:
@@ -1210,14 +1374,31 @@ class NetMonGuruApp(App):
         else:
             note.update("")
 
-        self.proc_rows = aggregate(snap.connections, snap.procs)[:250]
+        rows = aggregate(snap.connections, snap.procs)
+        if self.search_term:
+            term = self.search_term.lower()
+            rows = [r for r in rows
+                    if term in f"{r.name} {r.pid or ''}".lower()
+                    or term in self._proc_ti(r)[1].lower()]
+        # like the connections pane: a process talking to a confirmed
+        # malicious peer leads the list whatever its traffic
+        rows.sort(key=lambda r: self._proc_ti(r)[0] != "malicious")
+        self.proc_rows = rows[:250]
         items = []
         for r in self.proc_rows:
             listening = ",".join(str(p) for p in sorted(r.listen_ports)[:6])
+            level, label = self._proc_ti(r)
+            sig = snap.procsig.get(r.pid) if r.pid else None
             items.append((self._proc_key(r), [
                 Text(str(r.pid if r.pid is not None else "-"),
                      style="#7a8a99"),
                 Text(r.name[:26], style="#e6edf3"),
+                Text(f" {label[:38]} " if label else "",
+                     style=LEVEL_STYLES.get(level, "#4a5a6a")),
+                Text(sig.short + ("!" if sig.path_flags else ""),
+                     style="bold #ff5f5f" if sig.verdict == "suspicious"
+                     else SIG_STYLES.get(sig.signing, "#4a5a6a"))
+                if sig is not None else Text(""),
                 Text(f"{human_rate(r.in_rate) if r.in_rate else '-':>10}",
                      style="#5fd7ff"),
                 Text(f"{human_rate(r.out_rate) if r.out_rate else '-':>10}",
@@ -1231,6 +1412,201 @@ class NetMonGuruApp(App):
                 Text(str(r.remotes or "-"), style="#7fb3d5"),
                 Text(listening or "-", style="#c6a15b")]))
         self._sync_table(table, items)
+
+        bar = self._find("#proc-bar", Static)
+        if bar is not None:
+            t = Text(" enter/click: details  i: investigate process (TI + "
+                     "OSINT)  P: monitor  k: terminate  /: filter",
+                     style="#4a5a6a")
+            if self.search_term:
+                t.append(f"   /{self.search_term} ", style="bold #ffd75f")
+            t.append(f"   {len(self.proc_rows)} processes", style="#4a5a6a")
+            bar.update(t)
+        if self.proc_detail_open:
+            self._render_proc_detail()
+
+    def _proc_conns(self, r: ProcRow) -> List[Tuple[str, Connection]]:
+        return [(k, c) for k, c in self.keyed
+                if (c.pid == r.pid if r.pid is not None
+                    else (c.pid is None and (c.pname or "?") == r.name))]
+
+    def _proc_ti(self, r: ProcRow) -> Tuple[str, str]:
+        """Worst verdict among the process' peers -> (level, label)."""
+        ti = self.snapshot.ti
+        if not ti:
+            return "", ""
+        seen: Dict[str, object] = {}
+        for c in self.snapshot.connections:
+            if c.raddr and c.raddr in ti and (
+                    c.pid == r.pid if r.pid is not None
+                    else (c.pid is None and (c.pname or "?") == r.name)):
+                seen[c.raddr] = ti[c.raddr]
+        if not seen:
+            return "", ""
+        rank = {"malicious": 3, "suspicious": 2, "info": 1}
+        worst = max(seen.values(), key=lambda v: rank.get(v.level, 0))
+        flagged = sum(1 for v in seen.values() if rank.get(v.level, 0) >= 2)
+        if rank.get(worst.level, 0) >= 1:
+            label = worst.label + (f" (+{flagged - 1} peer)"
+                                   if flagged > 1 else "")
+            return worst.level, label
+        if all(v.level == "clean" for v in seen.values()):
+            return "clean", "ok"
+        return "", "…" if any(v.abuse_state == "pending"
+                              for v in seen.values()) else ""
+
+    def _current_proc(self) -> Optional[ProcRow]:
+        table = self._find("#proc-table", DataTable)
+        if table is None or not self.proc_rows:
+            return None
+        idx = table.cursor_row
+        return self.proc_rows[idx] if 0 <= idx < len(self.proc_rows) else None
+
+    def _set_proc_detail(self, is_open: bool) -> None:
+        self.proc_detail_open = is_open
+        panel = self._find("#proc-detail", Horizontal)
+        if panel is None:
+            return
+        panel.set_class(is_open, "open")
+        if is_open:
+            self._render_proc_detail()
+            table = self._find("#proc-table", DataTable)
+            if table is not None:
+                table.call_after_refresh(table._scroll_cursor_into_view)
+
+    def _render_proc_detail(self) -> None:
+        info = self._find("#pd-info", Static)
+        conns_table = self._find("#pd-conns", DataTable)
+        if info is None or conns_table is None:
+            return
+        r = self._current_proc()
+        self.proc_detail_row = r
+        if r is None:
+            info.update(Text("no process selected", style="#4a5a6a"))
+            self.proc_detail_conns = []
+            self._sync_table(conns_table, [])
+            return
+        now = time.time()
+        label = "#7a8a99"
+
+        def line(t: Text, name: str, value: str, style: str = "#e6edf3",
+                 extra: str = "", extra_style: str = "#7a8a99") -> None:
+            t.append(f" {name:<11}", style=label)
+            t.append(value or "-", style=style if value else "#4a5a6a")
+            if extra:
+                t.append(f"   {extra}", style=extra_style)
+            t.append("\n")
+
+        level, ti_label = self._proc_ti(r)
+        t = Text()
+        t.append(f" {r.name} ", style="bold #06090c on #5fd7ff")
+        t.append(f"  pid {r.pid if r.pid is not None else '?'}  ",
+                 style="#c8d3de")
+        if ti_label:
+            t.append(f" {ti_label} ", style=LEVEL_STYLES.get(level, ""))
+        t.append("\n")
+
+        p = process_info(r.pid)
+        if p:
+            line(t, "executable", str(p.get("exe") or p.get("name") or ""))
+            line(t, "user", str(p.get("user") or ""), "#c8d3de",
+                 f"parent {p.get('parent', '?')} ({p['ppid']})"
+                 if p.get("ppid") else "")
+            bits = " · ".join(str(b) for b in (
+                f"up {_span(now - float(p['started']))}"
+                if p.get("started") else "",
+                f"rss {human_bytes(int(p['rss']))}" if p.get("rss") else "",
+                f"{p['threads']} threads" if p.get("threads") else "",
+                str(p.get("status") or "")) if b)
+            line(t, "runtime", bits, "#9fb0c0")
+            cmd = str(p.get("cmdline") or "")
+            if cmd and cmd != p.get("exe"):
+                line(t, "cmdline", cmd[:200], "#7a8a99")
+        elif r.pid:
+            line(t, "executable", "", extra="details need sudo or the process "
+                                            "has exited")
+        else:
+            line(t, "executable", "", extra="owner unknown — run with sudo to "
+                                            "attribute sockets")
+        sig = self.snapshot.procsig.get(r.pid) if r.pid else None
+        if sig is not None:
+            line(t, "signature", sig.signing + (f" — {sig.signer}"
+                                                if sig.signer else ""),
+                 LEVEL_TEXT.get(sig.verdict, "#9fb0c0"))
+            if sig.path_flags:
+                line(t, "path flags", ", ".join(sig.path_flags),
+                     "bold #ffaf5f")
+            if sig.error:
+                line(t, "", sig.error, "#7a8a99")
+        line(t, "traffic", f"▼ {human_rate(r.in_rate)}  ▲ "
+                           f"{human_rate(r.out_rate)}", "#c8d3de",
+             f"total in {human_bytes(r.bytes_in)} / out "
+             f"{human_bytes(r.bytes_out)}")
+        line(t, "sockets", f"{r.conns} ({r.established} established, "
+                           f"{r.remotes} peer(s))", "#c8d3de",
+             "listening on " + ", ".join(map(str, sorted(r.listen_ports)[:10]))
+             if r.listen_ports else "")
+
+        mine = self._proc_conns(r)
+        peers = {c.raddr for _, c in mine if c.raddr}
+        flagged = [(ip, self.snapshot.ti[ip]) for ip in sorted(peers)
+                   if ip in self.snapshot.ti
+                   and self.snapshot.ti[ip].level in ("malicious",
+                                                      "suspicious")]
+        t.append(f" {'intel':<11}", style=label)
+        if flagged:
+            t.append(f"{len(flagged)} of {len(peers)} peer(s) flagged\n",
+                     style=LEVEL_TEXT.get(level, ""))
+            for ip, v in flagged[:4]:
+                t.append(f"            {ip}  ", style="#c8d3de")
+                t.append(f" {v.label[:30]} ",
+                         style=LEVEL_STYLES.get(v.level, ""))
+                t.append("\n")
+        elif peers:
+            t.append(f"no flagged peer among {len(peers)}\n", style="#5f875f")
+        else:
+            t.append("no remote peers\n", style="#4a5a6a")
+        hits = [i for i, rule in enumerate(self.watchlist)
+                if any(rule.matches(c, self._hostname(c.raddr))
+                       for _, c in mine)]
+        if hits:
+            line(t, "monitored", ", ".join(f"rule #{i + 1}" for i in hits),
+                 "#ff87d7")
+        t.append(" i investigate · P monitor process · k terminate · tab: "
+                 "connections (enter opens, i investigates) · esc close",
+                 style="#4a5a6a")
+        info.update(t)
+
+        rank = {"malicious": 0, "suspicious": 1}
+        mine.sort(key=lambda kc: (
+            rank.get(self._ti_level(kc[1].raddr), 2), not kc[1].raddr,
+            kc[1].raddr, kc[1].rport))
+        self.proc_detail_conns = mine
+        flows = self.snapshot.flows
+        items = []
+        for key, c in mine:
+            v = self.snapshot.ti.get(c.raddr) if c.raddr else None
+            f = next((x for x in flows.values()
+                      if (x.proto, x.lport, x.raddr, x.rport) ==
+                      (c.proto, c.lport, c.raddr, c.rport)), None)
+            items.append((key, [
+                Text(f" {v.label[:22]} ", style=LEVEL_STYLES.get(v.level, ""))
+                if v is not None and v.label else Text(""),
+                _proto_text(c), _state_text(c),
+                Text(c.remote if c.raddr else f"(local :{c.lport})",
+                     style="#c8d3de" if c.raddr else "#4a5a6a"),
+                Text(self._hostname(c.raddr)[:30], style="#7fb3d5"),
+                Text(_short_location(self._geo(c.raddr))[:20],
+                     style="#c6a15b"),
+                Text(human_rate(f.in_rate) if f and f.in_rate else "-",
+                     style="#5fd7ff"),
+                Text(human_rate(f.out_rate) if f and f.out_rate else "-",
+                     style="#ffaf5f")]))
+        self._sync_table(conns_table, items)
+        title = self._find("#pd-conns-title", Static)
+        if title is not None:
+            title.update(f" CONNECTIONS OF {r.name} ({len(mine)}) — enter: "
+                         "open in Connections, i: investigate address")
 
     @staticmethod
     def _proc_key(r: ProcRow) -> str:
@@ -1454,6 +1830,10 @@ class NetMonGuruApp(App):
         if table_id == "intel-list":
             self._render_intel_report(force=True)
             return
+        if table_id == "proc-table":
+            if self.proc_detail_open and event.data_table.has_focus:
+                self._render_proc_detail()
+            return
         if table_id == "conn-table":
             if self._find("#detail", DetailBar) is not None:
                 self._render_detail()
@@ -1470,16 +1850,28 @@ class NetMonGuruApp(App):
                     and row != world.selected:
                 world.select(row)
                 self._render_map_detail()
-        elif table_id == "nic-table":
-            row = event.cursor_row
-            names = ["total"] + sorted(self.snapshot.nics)
-            if row is not None and 0 <= row < len(names):
-                self.nic_choice = names[row]
+        elif table_id == "bw-table":
+            if event.data_table.has_focus:
+                self._render_bandwidth()          # graph follows the cursor
 
     def on_data_table_row_selected(self, event) -> None:
         table_id = event.data_table.id
         if table_id == "conn-table":
             self._set_detail(True)
+        elif table_id == "bw-table":
+            self._bw_drill(event.cursor_row)
+        elif table_id == "proc-table":
+            self._set_proc_detail(True)
+        elif table_id == "pd-conns":
+            idx = event.cursor_row
+            if 0 <= idx < len(self.proc_detail_conns):
+                key = self.proc_detail_conns[idx][0]
+                self.action_show_tab("tab-conn")
+                table = self._find("#conn-table", DataTable)
+                if table is not None and self._cursor_to_key(table, key):
+                    self._set_detail(True)
+                else:
+                    self._notify("hidden by the current filters")
         elif table_id == "cd-procs":
             idx = event.cursor_row
             if 0 <= idx < len(self.detail_related):
@@ -1504,6 +1896,8 @@ class NetMonGuruApp(App):
             return
         self._render_connections()
         self._render_dns()
+        self._render_bandwidth()
+        self._render_processes()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "intel-input":
@@ -1556,6 +1950,21 @@ class NetMonGuruApp(App):
         """Turn the marked connections (or the highlighted one when nothing
         is marked) into monitor rules and open the Monitor pane.  Calling it
         again later simply adds to the existing rules."""
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is not None and tabs.active == "tab-proc":
+            r = self._current_proc()
+            if r is None or r.name in ("", "?"):
+                self._notify("no named process selected")
+                return
+            added = self.watchlist.add(WatchRule(pname=r.name,
+                                                 scope="process"))
+            self.tracker.observe(self.keyed, {
+                c.raddr: self._hostname(c.raddr) for _, c in self.keyed
+                if c.raddr}, time.time(), self.seen)
+            self._notify(f"monitor: process {r.name} added" if added
+                         else "monitor: already monitored")
+            self.action_show_tab("tab-mon")
+            return
         if not self._on_conn_pane():
             return
         by_key = dict(self.keyed)
@@ -1620,10 +2029,10 @@ class NetMonGuruApp(App):
             else:
                 verdict = Text(f" {level.upper()} ",
                                style=LEVEL_STYLES.get(level, ""))
-            items.append((f"{r.ip}@{r.started}", [
+            items.append((f"{r.title}@{r.started}", [
                 Text(time.strftime("%H:%M:%S", time.localtime(r.started)),
                      style="#7a8a99"),
-                Text(f"{r.ip}" + (f":{r.port}" if r.port else ""),
+                Text(("⚙ " if r.kind == "process" else "") + r.title[:30],
                      style="#e6edf3"),
                 verdict,
                 Text((r.pname or "-")[:14], style="#9fb0c0")]))
@@ -1660,7 +2069,8 @@ class NetMonGuruApp(App):
         r = self._selected_report()
         sig = None if r is None else (
             r.started, r.pending, r.done,
-            tuple(s.status for s in r.sources.values()))
+            tuple(s.status for s in r.sources.values()),
+            tuple(sub.done for sub in r.subs))
         if not force and sig == self._intel_sig:
             return
         self._intel_sig = sig
@@ -1681,7 +2091,7 @@ class NetMonGuruApp(App):
     def _report_text(self, r) -> Text:
         level, reasons = r.overall()
         t = Text()
-        t.append(f" {r.ip}" + (f":{r.port}" if r.port else "") + " ",
+        t.append(f" {'PROCESS  ' if r.kind == 'process' else ''}{r.title} ",
                  style="bold #06090c on #5fd7ff")
         if r.hostname:
             t.append(f"  {r.hostname}", style="#7fb3d5")
@@ -1711,13 +2121,15 @@ class NetMonGuruApp(App):
             for k, v in r.context:
                 fact(k, v)
 
-        head("LOCAL FEEDS")
-        if r.feed_hits:
-            for h in r.feed_hits:
-                t.append(f"   {h.label} ", style=LEVEL_STYLES.get(h.severity))
-                t.append(f"  {h.detail}\n", style="#c8d3de")
-        else:
-            t.append("   no hit in any local feed\n", style="#5f875f")
+        if r.kind == "ip":
+            head("LOCAL FEEDS")
+            if r.feed_hits:
+                for h in r.feed_hits:
+                    t.append(f"   {h.label} ",
+                             style=LEVEL_STYLES.get(h.severity))
+                    t.append(f"  {h.detail}\n", style="#c8d3de")
+            else:
+                t.append("   no hit in any local feed\n", style="#5f875f")
 
         if r.process is not None:
             p = r.process
@@ -1762,6 +2174,51 @@ class NetMonGuruApp(App):
                     fact(k, str(v)[:200])
                 if x.link and x.status in ("ok", "none"):
                     t.append(f"   {x.link}\n", style="#4a6a8a")
+
+        if r.kind == "process":
+            head(f"REMOTE PEERS ({len(r.peers)})")
+            deep = {sub.ip for sub in r.subs}
+            for ip, port, host, lvl, label in r.peers[:40]:
+                t.append(f"   {ip + ':' + str(port):<28}", style="#c8d3de")
+                t.append(f"{(host or '-')[:34]:<36}", style="#7fb3d5")
+                if label:
+                    t.append(f" {label} ", style=LEVEL_STYLES.get(lvl, ""))
+                else:
+                    t.append("no local data", style="#4a5a6a")
+                if ip in deep:
+                    t.append("  ← investigated below", style="#4a5a6a")
+                t.append("\n")
+            if not r.peers:
+                t.append("   no public peers\n", style="#4a5a6a")
+            for sub in r.subs:
+                sub_level, _ = sub.overall()
+                head(f"PEER {sub.title}" + (f"  {sub.hostname}"
+                                            if sub.hostname else ""))
+                if sub.done:
+                    t.append(f"   verdict  ", style="#7a8a99")
+                    t.append(f" {sub_level.upper()} ",
+                             style=LEVEL_STYLES.get(sub_level, ""))
+                else:
+                    t.append(f"   collecting… {sub.pending} pending",
+                             style="#ffd75f")
+                t.append("   (full report: see the list on the left)\n",
+                         style="#4a5a6a")
+                for h in sub.feed_hits:
+                    t.append(f"   {h.label} ",
+                             style=LEVEL_STYLES.get(h.severity))
+                    t.append(f"  {h.detail}\n", style="#c8d3de")
+                for x in sub.sources.values():
+                    if x.status == "skipped":
+                        continue
+                    t.append(f"   {x.title[:30]:<31}", style="#e6edf3")
+                    if x.verdict:
+                        t.append(f" {x.verdict.upper()} ",
+                                 style=LEVEL_STYLES.get(x.verdict, ""))
+                        t.append(" ")
+                    elif x.status != "ok":
+                        t.append(f"{x.status} ",
+                                 style=STATUS_STYLES.get(x.status, ""))
+                    t.append(f"{x.headline[:110]}\n", style="#9fb0c0")
         return t
 
     def _conn_context(self, c: Connection) -> List[Tuple[str, str]]:
@@ -1795,12 +2252,46 @@ class NetMonGuruApp(App):
                 box.focus()
             return
         c = self._target_conn()
+        if c is None and tabs is not None and tabs.active == "tab-proc":
+            self._investigate_process()
+            return
         if c is None or not c.raddr:
             self._notify("select a connection with a remote address")
             return
         self.ti.investigate(c.raddr, c.rport, c.proto,
                             self._hostname(c.raddr), c.pid, c.pname,
                             self._conn_context(c))
+        self._open_intel()
+
+    def _investigate_process(self) -> None:
+        r = self._current_proc()
+        if r is None:
+            self._notify("no process selected")
+            return
+        mine = [c for _, c in self._proc_conns(r)]
+        peers = [(c.raddr, c.rport, c.proto, self._hostname(c.raddr))
+                 for c in mine if c.raddr]
+        p = process_info(r.pid)
+        ctx = [("sockets", f"{r.conns} ({r.established} established), "
+                           f"{r.remotes} peer(s)"),
+               ("traffic", f"down {human_rate(r.in_rate)}, up "
+                           f"{human_rate(r.out_rate)}, total in "
+                           f"{human_bytes(r.bytes_in)} / out "
+                           f"{human_bytes(r.bytes_out)}")]
+        if r.listen_ports:
+            ctx.append(("listening on", ", ".join(
+                map(str, sorted(r.listen_ports)[:12]))))
+        for name, key in (("user", "user"), ("command line", "cmdline")):
+            if p.get(key):
+                ctx.append((name, str(p[key])[:200]))
+        if p.get("ppid"):
+            ctx.append(("parent", f"{p.get('parent', '?')} ({p['ppid']})"))
+        names = sorted({e.name for e in self.monitor.dns.cache.entries()
+                        if any(ip in getattr(e, "addresses", [])
+                               for ip, *_ in peers)})
+        if names:
+            ctx.append(("names resolved", ", ".join(names[:10])))
+        self.ti.investigate_process(r.pid, r.name, peers, ctx)
         self._open_intel()
 
     def _investigate_text(self, value: str) -> None:
@@ -1860,6 +2351,12 @@ class NetMonGuruApp(App):
             if table is not None and 0 <= table.cursor_row < len(self.mon_rows):
                 entry = self.mon_rows[table.cursor_row]
                 return None if entry.closed else entry.conn
+        if active == "tab-proc":
+            table = self._find("#pd-conns", DataTable)
+            if table is not None and table.has_focus and \
+                    0 <= table.cursor_row < len(self.proc_detail_conns):
+                return self.proc_detail_conns[table.cursor_row][1]
+            return None
         if active == "tab-map":
             table = self._find("#map-detail", DataTable)
             if table is not None and \
@@ -1869,6 +2366,19 @@ class NetMonGuruApp(App):
 
     def action_kill_connection(self) -> None:
         c = self._target_conn()
+        tabs = self._find("#tabs", TabbedContent)
+        if c is None and tabs is not None and tabs.active == "tab-proc":
+            r = self._current_proc()
+            if r is None or not r.pid:
+                self._notify("no process with a known pid selected")
+                return
+            ghost = Connection(proto="", family="", pid=r.pid, pname=r.name,
+                               state=f"{r.conns} socket(s)")
+            self.push_screen(
+                KillScreen(ghost, "", r.conns, "pick a single connection to "
+                           "cut (tab → list on the right, or Connections)"),
+                lambda choice: self._do_kill(ghost, choice))
+            return
         if c is None:
             self._notify("no live connection selected")
             return
@@ -1978,13 +2488,56 @@ class NetMonGuruApp(App):
         self.query_one("#worldmap", WorldMap).select_next(-1)
 
     def action_cycle_nic(self) -> None:
-        names = ["total"] + sorted(self.snapshot.nics)
-        try:
-            i = names.index(self.nic_choice)
-        except ValueError:
-            i = 0
-        self.nic_choice = names[(i + 1) % len(names)]
+        table = self._find("#bw-table", DataTable)
+        if table is not None and table.row_count:
+            table.move_cursor(row=(table.cursor_row + 1) % table.row_count)
+            self._render_bandwidth()
+
+    def action_bw_view(self, view: str = "") -> None:
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is None or tabs.active != "tab-bw":
+            return
+        if view not in BW_VIEWS:
+            view = BW_VIEWS[(BW_VIEWS.index(self.bw_view) + 1) % len(BW_VIEWS)]
+        self.bw_view = view
+        self.bw_process = None
         self._render_bandwidth()
+        table = self._find("#bw-table", DataTable)
+        if table is not None and table.row_count:
+            table.move_cursor(row=0)
+            self._render_bandwidth()
+
+    def _bw_drill(self, row: int) -> None:
+        """Enter on a process -> its connections; on a connection -> open it
+        in the Connections pane."""
+        if not 0 <= row < len(self.bw_keys):
+            return
+        key = self.bw_keys[row]
+        if self.bw_view == "processes" and key != ALL_KEY:
+            p = self.snapshot.procs.get(key)
+            if p is not None:
+                self.bw_view = "connections"
+                self.bw_process = (p.pid, p.name)
+                self._render_bandwidth()
+                table = self._find("#bw-table", DataTable)
+                if table is not None:
+                    table.move_cursor(row=0)
+                self._render_bandwidth()
+        elif self.bw_view == "connections" and key != ALL_KEY:
+            f = self.snapshot.flows.get(key)
+            if f is None:
+                return
+            for k, c in self.keyed:
+                if (c.proto, c.lport, c.raddr, c.rport) == \
+                        (f.proto, f.lport, f.raddr, f.rport):
+                    self.action_show_tab("tab-conn")
+                    table = self._find("#conn-table", DataTable)
+                    if table is not None and self._cursor_to_key(table, k):
+                        self._set_detail(True)
+                    else:
+                        self._notify("hidden by the current filters")
+                    return
+            self._notify("that connection is not in the socket table")
 
     def action_search(self) -> None:
         box = self.query_one("#search", Input)
@@ -1997,12 +2550,29 @@ class NetMonGuruApp(App):
         if not searching and self.detail_open:
             self._set_detail(False)
             return
+        tabs = self._find("#tabs", TabbedContent)
+        if not searching and tabs is not None and tabs.active == "tab-proc" \
+                and self.proc_detail_open:
+            self._set_proc_detail(False)
+            proc_table = self._find("#proc-table", DataTable)
+            if proc_table is not None:
+                proc_table.focus()
+            return
+        if not searching and tabs is not None and tabs.active == "tab-bw" \
+                and self.bw_process is not None:
+            self.bw_process = None
+            self.bw_view = "processes"
+            self._render_bandwidth()
+            return
         box.value = ""
         box.remove_class("visible")
         self.search_term = ""
         active = self.query_one("#tabs", TabbedContent).active
         focus_id = {"tab-dns": "#dns-live", "tab-intel": "#intel-list",
+                    "tab-bw": "#bw-table", "tab-proc": "#proc-table",
                     "tab-mon": "#mon-table"}.get(active, "#conn-table")
         self.query_one(focus_id, DataTable).focus()
         self._render_connections()
         self._render_dns()
+        self._render_bandwidth()
+        self._render_processes()
