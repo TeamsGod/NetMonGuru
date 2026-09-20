@@ -41,12 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dns-iface", default="", metavar="IF",
                    help="interface for --dns-capture pcap "
                         "(default: the system's primary interface)")
-    p.add_argument("--no-ti", action="store_true",
-                   help="disable threat intelligence completely (no feed "
-                        "downloads, no lookups)")
-    p.add_argument("--no-ti-auto", action="store_true",
-                   help="keep the local feeds and manual investigations but "
-                        "never send addresses to AbuseIPDB automatically")
     p.add_argument("--demo", action="store_true",
                    help="synthetic connection data (useful off macOS)")
     p.add_argument("--dump", action="store_true",
@@ -69,8 +63,7 @@ def main(argv=None) -> int:
                       dns_capture=args.dns_capture,
                       dns_window=max(60, args.dns_window),
                       dns_iface=args.dns_iface,
-                      demo=args.demo,
-                      ti=not args.no_ti, ti_auto=not args.no_ti_auto)
+                      demo=args.demo)
 
     if args.dump:
         return _dump(monitor)
@@ -86,7 +79,6 @@ def main(argv=None) -> int:
         app.run()
     finally:
         monitor.stop()
-        app.cutter.release()       # never leave pf rules behind
     return 0
 
 

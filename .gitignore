@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+screenshots/*.png
+Claude outputs/
+.DS_Store

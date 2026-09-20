@@ -152,8 +152,6 @@ class Snapshot:
     procs: Dict[str, ProcNet] = field(default_factory=dict)
     geo: Dict[str, GeoInfo] = field(default_factory=dict)
     dns_names: Dict[str, str] = field(default_factory=dict)
-    ti: Dict[str, object] = field(default_factory=dict)       # ip -> Verdict
-    procsig: Dict[int, object] = field(default_factory=dict)  # pid -> ProcSig
     total_up: float = 0.0
     total_down: float = 0.0
     up_history: List[float] = field(default_factory=list)

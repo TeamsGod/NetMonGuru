@@ -78,3 +78,102 @@ def aggregate(connections: Iterable[Connection],
     out.sort(key=lambda r: (-r.traffic, -r.established, -r.conns,
                             r.name.lower()))
     return out
+
+
+# ---------------------------------------------------------------------------
+# on-demand process details (connection detail panel)
+# ---------------------------------------------------------------------------
+
+_INFO_CACHE: Dict[int, tuple] = {}
+_INFO_TTL = 5.0
+
+
+def process_info(pid: Optional[int]) -> Dict[str, object]:
+    """Best-effort facts about one process.
+
+    Every field is fetched separately because macOS denies most of them for
+    other users' processes unless we run as root - a denied field is simply
+    missing from the result, never an error.
+    """
+    import time
+
+    if not pid:
+        return {}
+    cached = _INFO_CACHE.get(pid)
+    now = time.monotonic()
+    if cached and now - cached[0] < _INFO_TTL:
+        return cached[1]
+
+    info: Dict[str, object] = {}
+    try:
+        import psutil
+
+        p = psutil.Process(pid)
+        getters = {
+            "name": p.name,
+            "exe": p.exe,
+            "cmdline": lambda: " ".join(p.cmdline()),
+            "user": p.username,
+            "ppid": p.ppid,
+            "started": p.create_time,
+            "status": p.status,
+            "threads": p.num_threads,
+            "rss": lambda: p.memory_info().rss,
+            "cpu": lambda: p.cpu_percent(interval=None),
+        }
+        for name, fn in getters.items():
+            try:
+                value = fn()
+                if value not in (None, ""):
+                    info[name] = value
+            except Exception:                           # noqa: BLE001
+                continue
+        ppid = info.get("ppid")
+        if ppid:
+            try:
+                info["parent"] = psutil.Process(int(ppid)).name()
+            except Exception:                           # noqa: BLE001
+                pass
+    except Exception:                                   # noqa: BLE001
+        info = {}
+
+    if len(_INFO_CACHE) > 256:
+        _INFO_CACHE.clear()
+    _INFO_CACHE[pid] = (now, info)
+    return info
+
+
+def related_processes(target: Connection, connections: Iterable[Connection],
+                      rows: List[ProcRow]) -> List[tuple]:
+    """Processes tied to ``target``: its owner, then every other process
+    talking to the same remote address, then the owner's siblings by name.
+
+    Returns ``[(relation, ProcRow), ...]`` without duplicates.
+    """
+    def row_key(pid, name):
+        return pid if pid is not None else f"name:{name}"
+
+    index = {row_key(r.pid, r.name): r for r in rows}
+    out: List[tuple] = []
+    used = set()
+
+    def push(relation: str, pid, name) -> None:
+        key = row_key(pid, name or "?")
+        if key in used:
+            return
+        row = index.get(key)
+        if row is None:
+            return
+        used.add(key)
+        out.append((relation, row))
+
+    push("owner", target.pid, target.pname)
+    if target.raddr:
+        for c in connections:
+            if c.raddr == target.raddr:
+                push("same peer", c.pid, c.pname)
+    if target.pname and target.pname != "?":
+        for r in rows:
+            if r.name.lower() == target.pname.lower():
+                push("same app", r.pid, r.name)
+    return out

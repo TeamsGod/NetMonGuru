@@ -11,7 +11,6 @@ from .connections import ConnectionCollector
 from .dnswatch import DEFAULT_WINDOW, DNSWatcher
 from .enrich import Enricher
 from .models import Connection, ProcNet, Snapshot, is_routable
-from .ti import ThreatIntel
 
 
 class Monitor:
@@ -19,9 +18,7 @@ class Monitor:
                  dns: bool = True, mmdb: str = "", mmdb_asn: str = "",
                  per_process_bw: bool = True, use_netstat: bool = True,
                  dns_capture: str = "auto", dns_window: int = DEFAULT_WINDOW,
-                 dns_iface: str = "", demo: bool = False,
-                 ti: bool = True, ti_auto: bool = True,
-                 ti_engine: Optional[ThreatIntel] = None) -> None:
+                 dns_iface: str = "", demo: bool = False) -> None:
         self.interval = max(0.5, interval)
         self.demo = demo
         self.conns = ConnectionCollector(use_netstat=use_netstat)
@@ -31,9 +28,6 @@ class Monitor:
                               interface=dns_iface)
         self.enricher = Enricher(enabled=geo, resolve_dns=dns,
                                  mmdb=mmdb, mmdb_asn=mmdb_asn)
-        # demo / tests never talk to the network unless handed an engine
-        self.ti = ti_engine if ti_engine is not None else ThreatIntel(
-            enabled=ti and not demo, auto=ti_auto)
         self.snapshot = Snapshot(ts=time.time())
         self.paused = False
         self._stop = threading.Event()
@@ -45,7 +39,6 @@ class Monitor:
         if self._thread:
             return
         self.dns.start()
-        self.ti.start()
         if self.demo:
             _seed_demo_dns(self.dns)
         self._thread = threading.Thread(target=self._loop, daemon=True,
@@ -56,7 +49,6 @@ class Monitor:
         self._stop.set()
         self.enricher.stop()
         self.dns.stop()
-        self.ti.stop()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -105,9 +97,6 @@ class Monitor:
                 self.dns.note_reverse(ip, info.hostname)
         self.dns.cache.evict()
 
-        self.ti.submit(connections)
-        verdicts, procsig = self.ti.snapshot()
-
         up, down = self.bw.totals
         return Snapshot(
             connections=connections,
@@ -115,7 +104,6 @@ class Monitor:
             procs=procs,
             geo=geo,
             dns_names=self.dns.cache.names(),
-            ti=verdicts, procsig=procsig,
             total_up=up, total_down=down,
             up_history=list(self.bw.total_up_hist),
             down_history=list(self.bw.total_down_hist),
