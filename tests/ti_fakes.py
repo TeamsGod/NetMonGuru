@@ -14,6 +14,7 @@ FEEDS = {
     "emergingthreats": b"# comment\n198.51.100.23\n",
     "firehol": b"# level1\n0.0.0.0/8\n192.168.0.0/16\n91.92.240.0/22\n",
     "torproject": ("%s\n" % BAD).encode(),
+    "urlhaus": b"# hostfile\n127.0.0.1\tmalware-cdn.example\n127.0.0.1\tbad.test\n",
     "threatfox-api": json.dumps({"query_status": "ok", "data": [
         {"ioc": "203.0.113.66:4444", "ioc_type": "ip:port",
          "threat_type": "botnet_cc", "malware_printable": "Cobalt Strike",
@@ -96,6 +97,10 @@ def http(url, headers, body=None, timeout=10.0):
                                  "not_before": "2026-08-01T00:00:00"}]).encode()
     return 599, b"unexpected"
 
+
+from netmonguru.core.ti_sources import set_vt_rate   # noqa: E402
+
+set_vt_rate(100000)      # canned answers: never wait for a VirusTotal slot
 
 KEYS = {"abuseipdb": "k-abuse", "virustotal": "k-vt", "abusech": "k-ach",
         "otx": "k-otx"}

@@ -13,6 +13,7 @@ import json
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -37,6 +38,51 @@ def default_http(url: str, headers: Dict[str, str],
             return resp.status, resp.read(8 * 1024 * 1024)
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(64 * 1024) if exc.fp else b""
+
+
+class RateLimiter:
+    """Sliding window: at most ``rate`` calls per ``per`` seconds.  Callers
+    wait for a slot (investigations run on worker threads) instead of burning
+    a request on an HTTP 429."""
+
+    def __init__(self, rate: int, per: float = 60.0,
+                 clock=time.monotonic, sleep=time.sleep) -> None:
+        self.rate, self.per = max(1, int(rate)), per
+        self._clock, self._sleep = clock, sleep
+        self._stamps: List[float] = []
+        self._lock = threading.Lock()
+
+    def acquire(self, max_wait: float = 90.0) -> bool:
+        deadline = self._clock() + max_wait
+        while True:
+            with self._lock:
+                now = self._clock()
+                self._stamps = [t for t in self._stamps if now - t < self.per]
+                if len(self._stamps) < self.rate:
+                    self._stamps.append(now)
+                    return True
+                wait = self.per - (now - self._stamps[0]) + 0.05
+            if self._clock() + wait > deadline:
+                return False
+            self._sleep(wait)
+
+
+#: VirusTotal's public API allows 4 requests a minute
+VT_LIMITER = RateLimiter(4, 60.0)
+
+
+def set_vt_rate(per_minute: int) -> None:
+    global VT_LIMITER
+    VT_LIMITER = RateLimiter(per_minute, 60.0)
+
+
+def _vt_slot(r: "SourceResult") -> bool:
+    if VT_LIMITER.acquire():
+        return True
+    r.status = "limited"
+    r.headline = ("waited 90 s for a VirusTotal slot (4 requests/minute) - "
+                  "press i again in a moment")
+    return False
 
 
 @dataclass
@@ -157,7 +203,7 @@ def abuseipdb(ip: str, ctx: Ctx) -> SourceResult:
 def virustotal_ip(ip: str, ctx: Ctx) -> SourceResult:
     r = _new("virustotal", "VirusTotal")
     r.link = f"https://www.virustotal.com/gui/ip-address/{ip}"
-    if not _need(ctx, "virustotal", r):
+    if not _need(ctx, "virustotal", r) or not _vt_slot(r):
         return r
     code, body = ctx.http(f"https://www.virustotal.com/api/v3/ip_addresses/"
                           f"{urllib.parse.quote(ip)}",
@@ -207,7 +253,7 @@ def virustotal_file(sha256: str, ctx: Ctx) -> SourceResult:
     """Only the hash is sent - never the file."""
     r = _new("vt-file", "VirusTotal (process binary hash)", "process")
     r.link = f"https://www.virustotal.com/gui/file/{sha256}"
-    if not _need(ctx, "virustotal", r):
+    if not _need(ctx, "virustotal", r) or not _vt_slot(r):
         return r
     code, body = ctx.http(f"https://www.virustotal.com/api/v3/files/{sha256}",
                           {"x-apikey": ctx.keys["virustotal"]}, None, 15.0)

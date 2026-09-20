@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.6.0 — 2026-09-20  (macOS)
+
+### Added
+- **Alerts** (pane `8`, summary bar, macOS notifications, journal): `threat`,
+  `bad-domain`, `dga-domain`, `unsigned`, `new-listener`, `new-process`,
+  `new-country`, `upload-spike`, `beacon`. De-duplicated with a cooldown;
+  `Enter` jumps to the connection or process, `A` acknowledges.
+- **Baseline.** Learns what is normal (programs on the network, countries,
+  listeners, per-process upload) for `learn_days`, then reports each novelty
+  once. `--reset-baseline`.
+- **Beaconing detection** — regular check-ins of one process to one endpoint
+  (median gap + median absolute deviation, tolerant of a missed beat).
+- **Journal** — SQLite log of every connection (incl. closed ones, with the
+  verdict, signature, country and bytes at the time), every alert and every
+  DNS answer; retention, crash-safe reopen. **History pane** (`9`) with time
+  windows, flagged-only, filter, investigate and CSV export.
+  `--export FILE --what connections|alerts|dns --since 24h`.
+- **Headless mode** `--record` and `--print-launchd` (LaunchDaemon plist).
+- **Domain IOCs**: abuse.ch URLhaus host list and ThreatFox domains, matched
+  against live DNS (parent domains too) and against the hostname of every
+  connection — a clean IP behind a malicious name is flagged. DGA heuristic.
+  `TI` column in the DNS pane.
+- **Persistent host blocking**: `k` → `b`, pf table re-applied on start,
+  blocked-hosts table in the Alerts pane, optional `block.auto_malicious` and
+  `block.keep_on_exit`.
+- **macOS process context**: process tree, launchd persistence, hardened
+  runtime, sandbox, notable entitlements, open files — in the process panel
+  and in reports.
+- **`--doctor`**: checks nettop (incl. the per-connection listing), DNS
+  source, codesign, spctl, launchd index, pf rule syntax (parse-only),
+  notifications, folders, config, keys, journal, HTTPS.
+- **`config.toml`** with defaults for interval, views, sort, TI budgets,
+  alerts, baseline, journal, blocking. Typos warn, never abort.
+- `▼ DOWN` / `▲ UP` columns in Connections; `?` help screen per pane;
+  pipx install instructions.
+
+### Changed
+- VirusTotal calls wait for a free slot (4 per minute, configurable) instead
+  of failing with a rate-limit error.
+- Map and DNS tables are updated in place like the others - no more jumping
+  scroll position there either.
+- The footer shows only the essential keys; everything else is under `?`.
+- pf rules of the app are now owned by the sampler, so they are released in
+  headless mode as well.
+
 ## 1.5.0 — 2026-09-20
 
 ### Added

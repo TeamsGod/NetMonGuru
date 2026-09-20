@@ -13,6 +13,12 @@ from .dnswatch import DEFAULT_WINDOW, DNSWatcher
 from .enrich import Enricher
 from .models import Connection, ProcNet, Snapshot, is_routable
 from .ti import ThreatIntel
+from .alerts import AlertEngine, Baseline
+from .config import Config, config_dir
+from .journal import Journal
+from .killer import BlockList, PfCutter
+from .macos_ctx import MacContext
+from .watch import unique_keys
 
 
 class Monitor:
@@ -22,7 +28,12 @@ class Monitor:
                  dns_capture: str = "auto", dns_window: int = DEFAULT_WINDOW,
                  dns_iface: str = "", demo: bool = False,
                  ti: bool = True, ti_auto: bool = True,
-                 ti_engine: Optional[ThreatIntel] = None) -> None:
+                 ti_engine: Optional[ThreatIntel] = None,
+                 config: Optional[Config] = None,
+                 journal: Optional[Journal] = None,
+                 alerts: Optional[AlertEngine] = None,
+                 cutter: Optional[PfCutter] = None,
+                 blocklist: Optional[BlockList] = None) -> None:
         self.interval = max(0.5, interval)
         self.demo = demo
         self.conns = ConnectionCollector(use_netstat=use_netstat)
@@ -34,8 +45,47 @@ class Monitor:
         self.enricher = Enricher(enabled=geo, resolve_dns=dns,
                                  mmdb=mmdb, mmdb_asn=mmdb_asn)
         # demo / tests never talk to the network unless handed an engine
+        self.config = config or Config()
+        tcfg = self.config.section("ti")
         self.ti = ti_engine if ti_engine is not None else ThreatIntel(
-            enabled=ti and not demo, auto=ti_auto)
+            enabled=ti and not demo and bool(tcfg["enabled"]),
+            auto=ti_auto and bool(tcfg["auto_abuseipdb"]),
+            budget=int(tcfg["abuseipdb_daily_budget"]))
+        if ti_engine is None:
+            from .ti_sources import set_vt_rate
+            set_vt_rate(int(self.config.get("ti", "virustotal_per_minute")))
+        # demo / tests never write to the user's real journal or baseline
+        # unless they are handed one
+        jcfg = self.config.section("journal")
+        if journal is not None:
+            self.journal: Optional[Journal] = journal
+        elif demo or not jcfg["enabled"]:
+            self.journal = None
+        else:
+            self.journal = Journal(retention_days=int(jcfg["retention_days"]))
+        if alerts is not None:
+            self.alerts = alerts
+        else:
+            settings = dict(self.config.section("alerts"))
+            if demo:
+                settings["notify"] = False
+            self.alerts = AlertEngine(settings, Baseline(
+                learn_days=float(self.config.get("baseline", "learn_days")),
+                persist=not demo))
+        if self.journal is not None:
+            self.alerts.on_alert.append(self.journal.add_alert)
+        bcfg = self.config.section("block")
+        self.cutter = cutter or PfCutter(keep_on_exit=bool(
+            bcfg["keep_on_exit"]))
+        self.blocklist = blocklist if blocklist is not None else BlockList(
+            None if demo else config_dir() / "blocklist.json")
+        self.auto_block = bool(bcfg["auto_malicious"])
+        self.block_status = ""
+        self.macctx = MacContext()
+        self.dns_labels: Dict[str, str] = {}
+        self._dns_mark = time.time()
+        self._first_seen: Dict[str, float] = {}
+        self._first_primed = False
         self.snapshot = Snapshot(ts=time.time())
         self.paused = False
         self._stop = threading.Event()
@@ -48,6 +98,7 @@ class Monitor:
             return
         self.dns.start()
         self.ti.start()
+        self.apply_blocklist()
         if self.demo:
             _seed_demo_dns(self.dns)
         self._thread = threading.Thread(target=self._loop, daemon=True,
@@ -59,6 +110,10 @@ class Monitor:
         self.enricher.stop()
         self.dns.stop()
         self.ti.stop()
+        self.alerts.close()
+        if self.journal is not None:
+            self.journal.close()
+        self.cutter.release()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -111,8 +166,10 @@ class Monitor:
                 self.dns.note_reverse(ip, info.hostname)
         self.dns.cache.evict()
 
-        self.ti.submit(connections)
+        names = self.dns.cache.names()
+        self.ti.submit(connections, names)
         verdicts, procsig = self.ti.snapshot()
+        self._after_sample(connections, verdicts, procsig, geo, procs, names)
 
         up, down = self.bw.totals
         return Snapshot(
@@ -130,6 +187,98 @@ class Monitor:
             elevated=self.conns.elevated,
             backend=backend,
             ts=time.time())
+
+
+    # -- alerts, journal, blocking -----------------------------------------
+    def _after_sample(self, connections, verdicts, procsig, geo, procs,
+                      names) -> None:
+        now = time.time()
+        keyed = unique_keys(connections)
+        hostnames = {}
+        for _, c in keyed:
+            if c.raddr and c.raddr not in hostnames:
+                g = geo.get(c.raddr)
+                hostnames[c.raddr] = names.get(c.raddr) or (
+                    (g.hostname or "") if g else "")
+        try:
+            self.alerts.evaluate(keyed, verdicts, procsig, geo, procs,
+                                 hostnames, now)
+            fresh = [r for r in self.dns.cache.recent(300)
+                     if r.ts > self._dns_mark and r.source != "passive"]
+            if fresh:
+                self._dns_mark = max(r.ts for r in fresh)
+                labels = self.alerts.evaluate_dns(fresh, self.ti.lookup_domain,
+                                                  now)
+                self.dns_labels.update(labels)
+                if len(self.dns_labels) > 5000:
+                    self.dns_labels = dict(list(self.dns_labels.items())[-2500:])
+                if self.journal is not None and \
+                        self.config.get("journal", "record_dns"):
+                    self.journal.add_dns(fresh, labels)
+        except Exception as exc:                        # noqa: BLE001
+            self.alerts_error = f"alerts: {exc}"[:120]
+
+        live = set()
+        for key, _ in keyed:
+            live.add(key)
+            if key not in self._first_seen:
+                # sockets of the first sample were open before we started
+                self._first_seen[key] = now if self._first_primed else 0.0
+        for key in [k for k in self._first_seen if k not in live]:
+            del self._first_seen[key]
+        self._first_primed = self._first_primed or bool(keyed)
+
+        if self.journal is not None:
+            flows = {(f.proto, f.lport, f.raddr, f.rport): f
+                     for f in self.procnet.flows.values()}
+            meta = {}
+            for key, c in keyed:
+                g = geo.get(c.raddr) if c.raddr else None
+                v = verdicts.get(c.raddr) if c.raddr else None
+                sig = procsig.get(c.pid) if c.pid else None
+                f = flows.get((c.proto, c.lport, c.raddr, c.rport))
+                meta[key] = {
+                    "host": hostnames.get(c.raddr, ""),
+                    "country": (g.country_code or "") if g else "",
+                    "org": (g.org or "") if g else "",
+                    "ti_level": getattr(v, "level", "") or "",
+                    "ti_label": getattr(v, "label", "") or "",
+                    "sig": getattr(sig, "signing", "") or "",
+                    "bytes_in": f.bytes_in if f else 0,
+                    "bytes_out": f.bytes_out if f else 0,
+                    "first_seen": self._first_seen.get(key) or now,
+                }
+            self.journal.observe(keyed, meta, now)
+
+        if self.auto_block and self.cutter.available:
+            added = False
+            for ip, v in verdicts.items():
+                if getattr(v, "level", "") == "malicious" \
+                        and getattr(v, "hits", None) and ip not in self.blocklist:
+                    try:
+                        added |= self.blocklist.add(
+                            ip, names.get(ip, ""), v.label, by="auto")
+                    except ValueError:
+                        continue
+            if added:
+                self.apply_blocklist()
+
+    def apply_blocklist(self) -> str:
+        """Push the persisted blocklist into pf.  Needs root; without it the
+        list is kept and applied the next time NetMonGuru runs elevated."""
+        if not len(self.blocklist) and not self.cutter.blocked:
+            self.block_status = ""
+            return ""
+        if not self.cutter.available:
+            self.block_status = (f"{len(self.blocklist)} host(s) on the "
+                                 f"blocklist NOT enforced: "
+                                 f"{self.cutter.why_not}")
+            return self.block_status
+        ok, message = self.cutter.set_blocked(self.blocklist.ips())
+        self.block_status = message if ok else f"blocklist: {message}"
+        return self.block_status
+
+    alerts_error = ""
 
 
 # ---------------------------------------------------------------------------

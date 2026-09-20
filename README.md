@@ -6,7 +6,7 @@
 ░▀░▀░▀▀▀░░▀░░▀░▀░▀▀▀░▀░▀░▀▀▀░▀▀▀░▀░▀░▀▀▀░░░▀▀░░░▀░░░░▀░░░▀▀░░░▀░░▀▀░░▀░▀
 ```
 
-**Current version: 1.5.0** — see [CHANGELOG.md](CHANGELOG.md) for what is new.
+**Current version: 1.6.0** — see [CHANGELOG.md](CHANGELOG.md) for what is new.
 The previous release (1.1.0) is kept in [`old-version-V1/`](old-version-V1/).
 
 **Windows?** See [`windows/`](windows/) — the same 1.5.0 with Windows backends
@@ -24,7 +24,7 @@ https://buycoffee.to/blackopsninja
 ![Map with a selected destination](screenshots/2b-map-selected.svg)
 
 
-A btop-style network monitor for macOS, in the terminal. Seven panes over one
+A btop-style network monitor for macOS, in the terminal. Nine panes over one
 live picture of what your Mac is talking to:
 
 | Pane | Key | What it shows |
@@ -35,9 +35,23 @@ live picture of what your Mac is talking to:
 | **Processes** | `4` | Per-process view: throughput from `nettop`, socket counts, established connections, distinct peers and listening ports, plus a `TI` column (worst verdict among the process' peers) and `SIG` (who signed the binary). **Click a row** for process details and its connections; `i` investigates the whole process, `P` monitors it, `k` terminates it. |
 | **DNS** | `5` | Every name resolution as it happens — time, source, requesting process, type, query, answers — plus a rolling 15-minute cache keyed by name, and a resolutions-per-bucket graph. |
 | **Intel** | `7` | Threat intelligence: on-demand investigation of an address (reputation sources, WHOIS/RDAP, OSINT, owning process), history of investigations, state of the local feeds. |
+| **Alerts** | `8` | Everything the rules noticed — threats, malicious domains, beaconing, new listeners / programs / countries, upload spikes, unsigned binaries — plus the hosts you blocked. |
+| **History** | `9` | The on-disk journal: every connection, including closed ones, with the verdict and bytes at the time. Filter, investigate, export. |
 | **Monitor** | `6` | Only the traffic you chose to watch: the rules you created from marked connections, every live socket that matches them (new on top) and a history of the ones that have closed. |
 
 ## Install
+
+With [pipx](https://pipx.pypa.io) (one command, isolated, gives you the
+`netmonguru` command everywhere):
+
+```bash
+brew install pipx
+pipx install git+https://github.com/TeamsGod/NetMonGuru
+sudo "$(which netmonguru)"          # sudo does not see pipx's PATH
+```
+
+From a checkout:
+
 
 ```bash
 cd netmonguru
@@ -290,6 +304,141 @@ are handed back to your user.
 investigations but never sends an address anywhere on its own; `--no-ti`
 disables the whole subsystem.
 
+## Alerts
+
+NetMonGuru watches for you. Rules are evaluated on every sample — in the UI
+and in headless `--record` mode alike — and an alert lands in the **Alerts**
+pane (`8`), in the summary bar, in the journal and, for `medium` and above, in
+the macOS Notification Centre.
+
+| Alert | Fires when | Severity |
+|-------|-----------|----------|
+| `threat` | a process talks to a peer the feeds or AbuseIPDB call malicious / suspicious | high / medium |
+| `bad-domain` | a resolved name (or a parent domain) is on a domain IOC feed — catches C2 behind a CDN where the IP itself is clean | high |
+| `dga-domain` | a resolved name looks machine-generated (heuristic on the registrable label) | low |
+| `unsigned` | an unsigned / invalidly signed binary in a suspicious location connects to a public address | high |
+| `new-listener` | a process starts listening on a port not in the baseline | medium |
+| `new-process` | a program uses the network for the first time | medium |
+| `new-country` | first connection to a country outside `allowed_countries` (or, without a list, outside the baseline) | medium / low |
+| `upload-spike` | a process uploads above 10× its own normal (and above `upload_spike_mbps`) for three samples in a row | medium |
+| `beacon` | one process connects to one endpoint at regular intervals (≥ 6 connections, 5 s – 1 h apart, low jitter) — the classic C2 check-in | medium |
+
+`Enter` on an alert jumps to the live connection or process, `i` investigates
+its address, `A` acknowledges everything. The same alert is not repeated for
+`cooldown_minutes` (default 60).
+
+**Baseline.** "New" needs a notion of normal. For the first `learn_days`
+(default 3) NetMonGuru only learns — which programs use the network, which
+countries you talk to, who listens where, how much each process uploads — and
+raises no novelty alerts (threat, domain, unsigned and beacon alerts are active
+from the first minute). Afterwards each novelty is reported once and then
+becomes part of the baseline. The Alerts pane shows `baseline: learning — 2.4 d
+left` or `active`. `netmonguru --reset-baseline` starts over. The baseline lives
+in `~/.config/netmonguru/baseline.json`.
+
+## Journal, History and export
+
+Every connection is written to a SQLite journal
+(`~/.local/share/netmonguru/journal.db`): process, endpoints, hostname,
+country, organisation, the threat-intel verdict and code signature at the
+time, start, end and bytes — plus every alert and every DNS answer. Closed
+connections stay; rows older than `retention_days` (default 30) are pruned.
+
+* **History pane (`9`)** — what happened while you were not looking. `[` `]`
+  change the window (1 h / 24 h / 7 d / all), `!` shows only connections that
+  threat intel flagged, `/` filters by process, address, host, organisation,
+  country or port, `i` investigates the address of a row, `w` exports what is
+  shown to CSV.
+* **Export as evidence**
+
+  ```bash
+  netmonguru --export night.csv --since 12h
+  netmonguru --export alerts.json --what alerts --since 7d
+  netmonguru --export dns.csv --what dns --since all
+  ```
+
+* **Headless recorder** — no UI, just journal + alerts (printed to stdout) +
+  blocklist enforcement:
+
+  ```bash
+  sudo netmonguru --record
+  netmonguru --print-launchd        # LaunchDaemon plist + install commands
+  ```
+
+`--no-journal` / `--no-alerts` switch either off for one run.
+
+## Blocking hosts
+
+`k` on a connection now offers a fourth option: **`b` — block this host
+permanently**. The address goes on a blocklist
+(`~/.config/netmonguru/blocklist.json`) and into a pf table that drops traffic
+to and from it for every process and port. The list is re-applied each time
+NetMonGuru (or the `--record` service) starts as root; the Alerts pane lists
+blocked hosts with their state, `Tab` → `d` removes one.
+
+* pf filters addresses, not programs — a block is always a remote host. To
+  stop a *program*, terminate it (`k` → `t`).
+* Blocks are enforced while NetMonGuru runs. Set `block.keep_on_exit = true`
+  to leave the pf table loaded after quitting; with the `--record` LaunchDaemon
+  the block is effectively permanent.
+* `block.auto_malicious = true` blocks peers that a **local feed** calls
+  malicious as soon as they are seen. Off by default: feeds have false
+  positives, and an automatic block on a shared CDN address can break things.
+
+## Process context (macOS)
+
+The process detail panel and process reports now answer "how did this get
+here and what may it do":
+
+* **process tree** — the full parent chain and the children;
+* **persistence** — the launchd job(s) that start the binary
+  (`/Library/LaunchDaemons`, `/Library/LaunchAgents`, `~/Library/LaunchAgents`,
+  Apple's own), with `RunAtLoad` / `KeepAlive` and the plist path; a process
+  started by launchd that no job accounts for is called out;
+* in reports (`i`): **hardened runtime**, **app sandbox**, notable
+  **entitlements** (debuggable, library validation off, unsigned executable
+  memory, DYLD variables, camera / microphone, all files…), Gatekeeper /
+  notarization, and the **files the process has open**.
+
+## Configuration file
+
+`~/.config/netmonguru/config.toml` is created on first run with every option
+commented out. Flags on the command line win over the file.
+
+```toml
+[general]
+interval = 2.0
+bw_view = "processes"
+sort = "newest"
+
+[alerts]
+allowed_countries = ["PL", "DE", "US"]
+ignore_processes = ["Backblaze"]
+upload_spike_mbps = 8.0
+
+[journal]
+retention_days = 30
+
+[block]
+auto_malicious = false
+keep_on_exit = false
+```
+
+A typo in the file is reported on start-up and ignored — it never stops the
+monitor from running.
+
+## Self-check
+
+```bash
+sudo netmonguru --doctor
+```
+
+runs every macOS backend once — `lsof`, `nettop` (including the
+per-connection listing), the DNS source, `codesign`, `spctl`, launchd index,
+**pf rule syntax (parse-only, nothing is loaded)**, notifications, folders,
+config, keys, journal, outbound HTTPS — and prints OK / WARN / FAIL with the
+reason. Paste the output into an issue if something misbehaves.
+
 ## Investigating a process
 
 The Processes pane offers the same tools as Connections, aimed at the process:
@@ -356,13 +505,16 @@ killed hard, clean up with
 ## Keys
 
 ```
-1 … 7        switch pane
+1 … 9        switch pane                 ?       keys of the current pane
 enter/click  connection details        esc     close details / clear search
 m / x        mark row / unmark all     f F P   monitor marked: endpoint/host/process
 g            go to owning process      d / c   (Monitor) delete rule / clear closed
 k            end connection (cut / terminate / kill, with confirmation)
 i            investigate address (TI + whois + OSINT) → Intel pane (7)
 w / R        (Intel) write report to disk / refresh feeds
+A            (Alerts) acknowledge all       d   (Alerts, blocked hosts) unblock
+[ ] / !      (History) time window / flagged only   w   export CSV
+k → b        block the remote host permanently
 s          cycle sort (Newest first…)  t / u   toggle TCP / UDP
 /          search (process, ip, port,  e       established only
            country, org, hostname)     l       show/hide listening sockets
@@ -383,6 +535,12 @@ esc        clear search
     --no-dns           skip reverse DNS
     --bw-view VIEW     what the Bandwidth pane opens with: processes (default),
                        connections or interfaces
+    --doctor           check every macOS backend and exit
+    --record           headless: journal + alerts + blocklist, no UI
+    --export FILE      export the journal (.csv / .json); with --what and --since
+    --print-launchd    LaunchDaemon plist that runs --record at boot
+    --reset-baseline   forget what was learned as normal
+    --no-journal / --no-alerts
     --no-ti            no threat intelligence at all (no feed downloads, no lookups)
     --no-ti-auto       feeds + manual investigation only; never auto-query AbuseIPDB
     --no-netstat       do not merge the system-wide netstat socket table
@@ -433,12 +591,13 @@ columns rather than a frozen UI.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests    # 86 parser / cache / monitor / kill / threat-intel / flow tests
+python3 -m unittest discover -s tests    # 112 unit tests
 python3 tests/smoke_ui.py                # headless UI run, writes screenshots/
 python3 tests/smoke_monitor.py           # scrolling, new-on-top, details, marking, Monitor pane
 python3 tests/smoke_intel.py             # TI column, investigation, Intel pane (canned upstream answers)
 python3 tests/smoke_bandwidth.py         # per-process / per-connection bandwidth views
 python3 tests/smoke_processes.py         # Processes pane: TI, details, process investigation
+python3 tests/smoke_alerts.py            # alerts, History/journal, blocklist, help, DNS labels
 ```
 
 The smoke test drives the real TUI through Textual's headless pilot: it clicks

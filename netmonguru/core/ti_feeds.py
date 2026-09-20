@@ -49,6 +49,7 @@ class FeedDef:
     label: str
     needs_key: str = ""     # name of the API key that must be configured
     note: str = ""
+    kind: str = "ip"        # ip | domain
 
 
 FEEDS: List[FeedDef] = [
@@ -77,6 +78,14 @@ FEEDS: List[FeedDef] = [
             "master/firehol_level1.netset",
             "netlist", "suspicious", "BLOCKLIST",
             note="aggregate of the most trusted blocklists"),
+    FeedDef("urlhaus", "abuse.ch URLhaus (domains)",
+            "https://urlhaus.abuse.ch/downloads/hostfile/",
+            "hostfile", "malicious", "MALWARE-HOST", kind="domain",
+            note="host currently serving malware"),
+    FeedDef("threatfox_domains", "abuse.ch ThreatFox domains (7 days)",
+            "https://threatfox-api.abuse.ch/api/v1/",
+            "threatfox_domains", "malicious", "IOC", needs_key="abusech",
+            kind="domain", note="vetted domain IOCs with malware family"),
     FeedDef("tor", "Tor exit nodes",
             "https://check.torproject.org/torbulkexitlist",
             "netlist", "info", "TOR",
@@ -95,10 +104,11 @@ class FeedData:
     ips: Dict[str, List[Tuple[int, str]]] = field(default_factory=dict)
     nets: List[Tuple[int, int, int, str]] = field(default_factory=list)
     # nets: (version, first, last, original) sorted by first
+    domains: Dict[str, str] = field(default_factory=dict)   # name -> detail
 
     @property
     def size(self) -> int:
-        return len(self.ips) + len(self.nets)
+        return len(self.ips) + len(self.nets) + len(self.domains)
 
     def add(self, token: str, port: int = 0, detail: str = "") -> None:
         token = token.strip()
@@ -202,7 +212,77 @@ def _parse_threatfox(raw: bytes) -> FeedData:
     return data.finish()
 
 
+def _parse_hostfile(raw: bytes) -> FeedData:
+    """``127.0.0.1<TAB>bad.example`` (or a bare name) per line."""
+    data = FeedData()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name = line.split()[-1].lower().rstrip(".")
+        if "." in name and name not in ("localhost", "0.0.0.0") \
+                and not name.replace(".", "").isdigit():
+            data.domains[name] = ""
+    return data
+
+
+def _parse_threatfox_domains(raw: bytes) -> FeedData:
+    data = FeedData()
+    body = json.loads(raw.decode("utf-8", "replace"))
+    if body.get("query_status") != "ok":
+        raise ValueError(f"threatfox: {body.get('query_status')}")
+    for row in body.get("data") or []:
+        if row.get("ioc_type") != "domain":
+            continue
+        bits = [str(row.get("malware_printable") or ""),
+                str(row.get("threat_type") or ""),
+                f"confidence {row.get('confidence_level')}%"
+                if row.get("confidence_level") is not None else ""]
+        name = str(row.get("ioc") or "").lower().rstrip(".")
+        if name:
+            data.domains[name] = " · ".join(b for b in bits if b)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# algorithmically generated names
+# ---------------------------------------------------------------------------
+
+_VOWELS = set("aeiouy")
+
+
+def _entropy(text: str) -> float:
+    import math
+    counts = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(text)
+    return -sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def looks_generated(name: str) -> bool:
+    """Cheap DGA heuristic on the registrable label only - CDNs put random
+    strings in *sub*domains all the time, malware puts them in the domain."""
+    parts = name.lower().rstrip(".").split(".")
+    if len(parts) < 2:
+        return False
+    two_level = {"co", "com", "org", "net", "gov", "edu", "ac"}
+    label = parts[-3] if len(parts) >= 3 and parts[-2] in two_level \
+        else parts[-2]
+    if len(label) < 12 or "-" in label:
+        return False
+    letters = [ch for ch in label if ch.isalpha()]
+    digits = sum(ch.isdigit() for ch in label)
+    if not letters:
+        return digits >= 12
+    vowels = sum(ch in _VOWELS for ch in letters) / len(letters)
+    return _entropy(label) >= 3.5 and (vowels < 0.28 or digits / len(label)
+                                       > 0.3)
+
+
 _PARSERS: Dict[str, Callable[[bytes], FeedData]] = {
+    "hostfile": _parse_hostfile,
+    "threatfox_domains": _parse_threatfox_domains,
     "netlist": _parse_netlist,
     "feodo_json": _parse_feodo,
     "sslbl_csv": _parse_sslbl,
@@ -288,7 +368,7 @@ class FeedStore:
             st.status = f"needs {d.needs_key} key"
             return False
         try:
-            if d.fmt == "threatfox_api":
+            if d.fmt in ("threatfox_api", "threatfox_domains"):
                 raw = self.fetch(d.url, {"Auth-Key": self.keys[d.needs_key],
                                          "Content-Type": "application/json"},
                                  json.dumps({"query": "get_iocs",
@@ -325,9 +405,38 @@ class FeedStore:
         return sum(1 for i in idents if self.update(i))
 
     # -- lookup --------------------------------------------------------------
+    def lookup_domain(self, name: str, dga: bool = True
+                      ) -> Optional[FeedHit]:
+        """Exact name or any parent domain listed in a domain feed."""
+        name = (name or "").lower().rstrip(".")
+        if not name or "." not in name:
+            return None
+        parts = name.split(".")
+        candidates = [".".join(parts[i:]) for i in range(len(parts) - 1)]
+        for st in self.feeds.values():
+            if st.definition.kind != "domain" or not st.data.domains:
+                continue
+            for cand in candidates:
+                detail = st.data.domains.get(cand)
+                if detail is None:
+                    continue
+                d = st.definition
+                family = detail.split(" · ")[0] if detail else ""
+                label = f"{d.label} {family}".strip()
+                text = detail or d.note
+                if cand != name:
+                    text = f"parent {cand} listed — {text}"
+                return FeedHit(d.ident, label, d.severity, text)
+        if dga and looks_generated(name):
+            return FeedHit("dga", "DGA?", "info",
+                           "name looks machine-generated (heuristic)")
+        return None
+
     def lookup(self, ip: str, port: int = 0) -> List[FeedHit]:
         hits: List[FeedHit] = []
         for st in self.feeds.values():
+            if st.definition.kind != "ip":
+                continue
             found = st.data.find(ip)
             if found is None:
                 continue
