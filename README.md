@@ -216,27 +216,76 @@ The report ends in one verdict — `MALICIOUS`, `SUSPICIOUS`, `CLEAN` or
 `UNKNOWN` (no reputation source answered; an empty answer is never reported as
 clean) — with the list of who claimed what. `w` writes it to
 `~/netmonguru-reports/<ip>-<time>.md` and `.json` as audit evidence; `R`
-re-downloads the feeds.
+re-downloads the feeds. API keys: see [Managing API keys](#managing-api-keys).
 
 The `SIG` column shows who signed the owning binary (`apple`, `dev-id`,
 `store`, `ad-hoc`, `UNSIGNED`, `INVALID`); a `!` marks a suspicious launch
 path (`/tmp`, Downloads, hidden directory…). Unsigned **and** oddly placed is
 flagged red.
 
-**API keys** — all optional, a source without a key is skipped. Put them in
-`~/.config/netmonguru/keys.toml` (created on first run, mode 600):
+## Managing API keys
+
+All keys are optional. A source without a key is skipped and marked as such
+in the report; the local feeds work with no keys at all.
+
+**Where they live.** `~/.config/netmonguru/keys.toml` — created as a commented
+template on first run, mode `600`. One `name = "value"` per line:
 
 ```toml
 abuseipdb  = "…"   # https://www.abuseipdb.com/account/api    1000 checks/day
 virustotal = "…"   # https://www.virustotal.com/gui/my-apikey 500/day, 4/min
-abusech    = "…"   # https://auth.abuse.ch/                   ThreatFox
+abusech    = "…"   # https://auth.abuse.ch/                   fair use
 otx        = "…"   # https://otx.alienvault.com/api
-greynoise  = "…"   # optional - 10 lookups/day without a key
+greynoise  = "…"   # optional - 10 lookups/day work without a key
 ```
 
-or export `ABUSEIPDB_KEY`, `VT_API_KEY`, `ABUSECH_AUTH_KEY`, `OTX_API_KEY`,
-`GREYNOISE_KEY`. Note that VirusTotal's *public* key is licensed for
-non-commercial use only. `--no-ti` disables the whole subsystem.
+| Key | Unlocks |
+|-----|---------|
+| `abuseipdb` | AbuseIPDB in investigations **and the automatic check** of every new public peer (the `ok` / `abuse 87%` part of the `TI` column). No key → no automatic lookups. |
+| `virustotal` | VirusTotal for addresses and for the SHA-256 of a process binary. The *public* key is licensed for non-commercial use only. |
+| `abusech` | ThreatFox in investigations **and the ThreatFox local feed** (ip:port IOCs of the last 7 days). The other abuse.ch feeds need no key. |
+| `otx` | AlienVault OTX pulses. |
+| `greynoise` | Raises the GreyNoise Community limit; the source also runs without it. |
+
+**Environment variables** override the file — handy for one-off runs or CI:
+`ABUSEIPDB_KEY`, `VT_API_KEY`, `ABUSECH_AUTH_KEY`, `OTX_API_KEY`,
+`GREYNOISE_KEY`.
+
+```bash
+VT_API_KEY=… netmonguru              # this run only
+sudo -E .venv/bin/python -m netmonguru   # -E passes your exported keys to sudo
+```
+
+**Checking that a key works.** Keys are read at start-up, so restart after
+editing the file. Open the Intel pane (`7`): the status line shows `✓` / `✗`
+per source and how many automatic AbuseIPDB checks are left today. Then press
+`i` on any public connection — every source reports `ok`, `skipped` (no key),
+`API key rejected`, or `rate limit / daily quota reached`.
+
+**Quotas.** The automatic check asks once per address per 24 h, caches the
+answer in `~/.cache/netmonguru/ti_state.json` and stops at 900 lookups a day,
+below AbuseIPDB's free 1000. A process investigation runs the full source set
+for at most three peers because VirusTotal's public key allows 4 requests a
+minute; a `rate limit` line in a report means exactly that — wait a minute and
+press `i` again.
+
+**Running with `sudo`.** macOS keeps your `$HOME` under `sudo`, so the same
+`keys.toml` is used with and without it, and files NetMonGuru creates as root
+are handed back to your user.
+
+**Keeping them safe.**
+* The file sits outside the project folder, so it cannot end up in a commit.
+  Never paste keys into the repository, an issue or a screenshot.
+* If the file is readable by other users the Intel pane shows a warning — fix
+  it with `chmod 600 ~/.config/netmonguru/keys.toml`.
+* To rotate a key, generate a new one on the provider's site, replace the
+  line, restart. To stop using a source, delete or comment out its line.
+* Keys are only ever sent to their own provider, in a request header, over
+  HTTPS. Exported reports never contain them.
+
+**Turning lookups off.** `--no-ti-auto` keeps the local feeds and manual
+investigations but never sends an address anywhere on its own; `--no-ti`
+disables the whole subsystem.
 
 ## Investigating a process
 
