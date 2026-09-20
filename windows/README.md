@@ -1,6 +1,6 @@
 # NetMonGuru for Windows
 
-The Windows build of [NetMonGuru](../README.md) 1.5.0 — the same terminal UI
+The Windows build of [NetMonGuru](../README.md) 1.6.0 — the same terminal UI
 and the same features, with every macOS-specific backend replaced by its
 Windows counterpart. Pure Python: if Python runs on the machine, NetMonGuru
 runs.
@@ -28,6 +28,8 @@ runs.
 run.bat                 :: normal start
 run.bat --doctor        :: self-check of every Windows backend
 run.bat --demo          :: synthetic data, to look around safely
+run.bat --record        :: headless: journal + alerts + blocklist, no UI
+run.bat --export night.csv --since 12h
 ```
 
 Manual install, if you prefer:
@@ -50,6 +52,8 @@ py -m venv .venv
 | **Bandwidth per process / per connection** | ✘ | ✔ |
 | **Cut a single connection (`k` → `c`)** | ✘ | ✔ |
 | Terminate a process | your own processes | any process |
+| Alerts, journal, History, export, baseline | ✔ | ✔ |
+| **Block a host permanently (`k` → `b`)** | saved, not enforced | ✔ (Windows Firewall) |
 
 Right-click *Windows Terminal* → *Run as administrator*, then start
 `run.bat` from there.
@@ -67,6 +71,13 @@ Right-click *Windows Terminal* → *Run as administrator*, then start
 | Cut one connection | `pf` block rules | `SetTcpEntry(DELETE_TCB)` — the kernel closes the socket **immediately**, nothing is left behind |
 | Terminate / force kill | SIGTERM / SIGKILL | `t` terminates the process, `K` terminates it **with its child processes** |
 | `whois` | system command | built-in port-43 client (follows registry referrals) |
+| Alert notifications | Notification Centre (`osascript`) | toast notifications (WinRT via PowerShell, no extra package) |
+| Permanent host block | pf table | Windows Firewall rules `NetMonGuru block <ip>` (in + out) via `netsh advfirewall` |
+| Persistence of a process | launchd jobs | Run / RunOnce keys, Startup folders, services, scheduled tasks |
+| Entitlements / hardened runtime / sandbox | `codesign` | — (no Windows counterpart; signature and Mark-of-the-Web are shown instead) |
+| Open files of a process | `lsof` | `psutil` |
+| Background recorder | LaunchDaemon (`--print-launchd`) | scheduled task at logon, highest privileges (`--print-task`) |
+| Journal | `~/.local/share/netmonguru/journal.db` | `%LOCALAPPDATA%\netmonguru\data\journal.db` |
 | Config | `~/.config/netmonguru` | `%APPDATA%\netmonguru` (`keys.toml`, `monitor.json`) |
 | Cache / feeds | `~/.cache/netmonguru` | `%LOCALAPPDATA%\netmonguru\cache` |
 | Reports | `~/netmonguru-reports` | `%USERPROFILE%\netmonguru-reports` |
@@ -75,6 +86,33 @@ Everything else — panes, keys, threat feeds, API sources, Monitor rules, repor
 format — is identical; see the [main README](../README.md) for the full guide
 and [Managing API keys](../README.md#managing-api-keys) (on Windows the file is
 `%APPDATA%\netmonguru\keys.toml`; the environment variables are the same).
+
+## New in 1.6 on Windows
+
+Everything from the macOS 1.6 release — see the main README for the full
+description of [alerts](../README.md#alerts), the
+[journal and History](../README.md#journal-history-and-export),
+[blocking](../README.md#blocking-hosts) and the
+[configuration file](../README.md#configuration-file). Windows specifics:
+
+* **Alerts** raise toast notifications. The `unsigned` rule uses Authenticode
+  and the Windows launch-path heuristics; all other rules are identical.
+* **Blocking** (`k` → `b`) creates two Windows Firewall rules per host, named
+  `NetMonGuru block <ip>`. They are removed when NetMonGuru exits and
+  re-created from `%APPDATA%\netmonguru\blocklist.json` on the next elevated
+  start; `block.keep_on_exit = true` leaves them in place. If the firewall is
+  switched off for the active profile the rules exist but nothing enforces
+  them — `--doctor` checks this. To clean up by hand:
+  `netsh advfirewall firewall delete rule name="NetMonGuru block 1.2.3.4"`.
+* **Process context** lists what starts the binary — Run keys, Startup
+  folder, service, scheduled task — the process tree (an orphaned process
+  outside `C:\Windows` is called out) and, in reports, its open files.
+  Reading scheduled tasks takes a second or two, so the index is cached for
+  five minutes.
+* **Background recorder**: `run.bat --print-task` prints the `schtasks`
+  command that starts `--record` at logon with highest privileges, windowless.
+* `config.toml`, `baseline.json`, `blocklist.json`, `monitor.json` and
+  `keys.toml` live in `%APPDATA%\netmonguru`.
 
 ## Windows-specific notes and limits
 
@@ -109,16 +147,19 @@ Same options as the macOS build, except:
 ```
 --dns-capture {auto,etw,cache,passive,off}
 --doctor            check every Windows backend and exit
+--print-task        scheduled-task command for a background recorder
+                    (replaces --print-launchd)
 ```
 
 ## Tests
 
 ```powershell
-.venv\Scripts\python -m unittest discover -s tests     # 102 unit tests
+.venv\Scripts\python -m unittest discover -s tests     # 135 unit tests
 .venv\Scripts\python tests\smoke_monitor.py            # headless UI suites
 .venv\Scripts\python tests\smoke_intel.py
 .venv\Scripts\python tests\smoke_bandwidth.py
 .venv\Scripts\python tests\smoke_processes.py
+.venv\Scripts\python tests\smoke_alerts.py
 ```
 
 `tests/test_win.py` pins down the Windows-specific pieces: structure sizes and

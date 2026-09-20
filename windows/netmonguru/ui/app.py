@@ -22,6 +22,7 @@ from ..core.monitor import Monitor
 from ..core.procs import ProcRow, aggregate, process_info, related_processes
 from ..core.watch import (DEFAULT_RULES_PATH, SeenIndex, WatchList, WatchRule,
                           WatchTracker, unique_keys)
+from .help import HELP, GLOBAL_HELP
 from .widgets.braille import sparkline
 from .widgets.graph import BandwidthGraph, MiniGraph
 from .widgets.worldmap import MARKER_PALETTE, MapPoint, WorldMap
@@ -60,6 +61,8 @@ TAB_FOCUS = {
     "tab-dns": "#dns-live",
     "tab-mon": "#mon-table",
     "tab-intel": "#intel-list",
+    "tab-alerts": "#alert-table",
+    "tab-hist": "#hist-table",
 }
 
 LEVEL_STYLES = {"malicious": "bold #ffffff on #d70000",
@@ -195,18 +198,22 @@ class KillScreen(ModalScreen):
         Binding("c", "pick('cut')", "Cut connection"),
         Binding("t", "pick('term')", "Terminate process"),
         Binding("K", "pick('kill')", "Force kill"),
+        Binding("b", "pick('block')", "Block host"),
         Binding("escape", "pick('')", "Cancel"),
         Binding("n", "pick('')", "Cancel", show=False),
         Binding("q", "pick('')", "Cancel", show=False),
     ]
 
     def __init__(self, conn: Connection, host: str, sockets: int,
-                 cut_error: str) -> None:
+                 cut_error: str, block_error: str = "",
+                 blocked: bool = False) -> None:
         super().__init__()
         self.conn = conn
         self.host = host
         self.sockets = sockets
         self.cut_error = cut_error
+        self.block_error = block_error
+        self.blocked = blocked
 
     def compose(self) -> ComposeResult:
         c = self.conn
@@ -243,6 +250,18 @@ class KillScreen(ModalScreen):
         if not can_sig:
             t.append("     unavailable: owning process unknown - run with "
                      "as Administrator\n", style="#ffaf5f")
+        can_block = bool(c.raddr) and not self.blocked
+        t.append("\n  b  ", style="bold #ffd75f" if can_block else "#4a5a6a")
+        t.append(f"block {c.raddr or 'host'} permanently",
+                 style="bold #e6edf3" if can_block else "#4a5a6a")
+        t.append("  — every process, every port; kept on the\n     "
+                 "blocklist across restarts (Alerts pane → d to unblock)\n",
+                 style="#7a8a99")
+        if self.blocked:
+            t.append("     already on the blocklist\n", style="#ffaf5f")
+        elif self.block_error and c.raddr:
+            t.append(f"     saved but not enforced now: {self.block_error}\n",
+                     style="#ffaf5f")
         t.append("\n  esc  cancel", style="#7a8a99")
         yield Static(t, id="kill-box")
 
@@ -251,7 +270,52 @@ class KillScreen(ModalScreen):
             return
         if choice in ("term", "kill") and not self.conn.pid:
             return
+        if choice == "block" and (not self.conn.raddr or self.blocked):
+            return
         self.dismiss(choice or None)
+
+
+class HelpScreen(ModalScreen):
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; background: #000000 60%; }
+    #help-box {
+        width: 100; height: auto; max-height: 90%; padding: 1 2;
+        background: #0c1116; border: heavy #2b6a94;
+    }
+    """
+    BINDINGS = [Binding("escape", "close", "Close"),
+                Binding("question_mark", "close", "Close"),
+                Binding("q", "close", "Close", show=False)]
+
+    def __init__(self, tab: str) -> None:
+        super().__init__()
+        self.tab = tab
+
+    def compose(self) -> ComposeResult:
+        title, rows = HELP.get(self.tab, ("", []))
+        t = Text()
+        t.append(f" {title.upper()} ", style="bold #06090c on #5fd7ff")
+        t.append("  keys for this pane\n\n", style="#7a8a99")
+        for key, text in rows:
+            t.append(f"  {key:<15}", style="bold #ffd75f")
+            t.append(f"{text}\n", style="#c8d3de")
+        t.append("\n EVERYWHERE \n\n", style="bold #06090c on #7fb3d5")
+        for key, text in GLOBAL_HELP:
+            t.append(f"  {key:<15}", style="bold #ffd75f")
+            t.append(f"{text}\n", style="#c8d3de")
+        t.append("\n  esc / ? to close", style="#4a5a6a")
+        yield Static(t, id="help-box")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+SEVERITY_RANK_UI = {"low": 1, "medium": 2, "high": 3}
+SEVERITY_STYLES = {"high": "bold #ffffff on #d70000",
+                   "medium": "bold #06090c on #ffaf5f",
+                   "low": "#d7afff"}
+HISTORY_WINDOWS = [("1 h", "1h"), ("24 h", "24h"), ("7 d", "7d"),
+                   ("all", "all")]
 
 
 class SummaryBar(Static):
@@ -320,6 +384,11 @@ class NetMonGuruApp(App):
     #pd-info { width: 1fr; height: 1fr; padding: 0 1; overflow-y: auto; }
     #pd-side { width: 1fr; height: 1fr; border-left: solid #1f2b36; }
     #pd-conns { height: 1fr; }
+    #alert-status { height: 1; background: #0c1116; padding: 0 1; }
+    #alert-table { height: 2fr; }
+    #block-table { height: 1fr; }
+    #hist-status { height: 1; background: #0c1116; padding: 0 1; }
+    #hist-table { height: 1fr; }
     #mon-status { height: 1; background: #0c1116; padding: 0 1; }
     #mon-rules { height: 9; }
     #mon-empty { height: auto; padding: 1 2; color: #7a8a99; }
@@ -341,12 +410,12 @@ class NetMonGuruApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("1", "show_tab('tab-conn')", "Conns"),
-        Binding("2", "show_tab('tab-map')", "Map"),
-        Binding("3", "show_tab('tab-bw')", "Bw"),
-        Binding("4", "show_tab('tab-proc')", "Procs"),
-        Binding("5", "show_tab('tab-dns')", "DNS"),
-        Binding("6", "show_tab('tab-mon')", "Mon"),
+        Binding("1", "show_tab('tab-conn')", "Conns", show=False),
+        Binding("2", "show_tab('tab-map')", "Map", show=False),
+        Binding("3", "show_tab('tab-bw')", "Bw", show=False),
+        Binding("4", "show_tab('tab-proc')", "Procs", show=False),
+        Binding("5", "show_tab('tab-dns')", "DNS", show=False),
+        Binding("6", "show_tab('tab-mon')", "Mon", show=False),
         Binding("m", "mark", "Mark"),
         Binding("f", "monitor_marked('endpoint')", "Monitor"),
         Binding("F", "monitor_marked('host')", "Monitor host", show=False),
@@ -358,18 +427,28 @@ class NetMonGuruApp(App):
         Binding("delete", "delete_rule", "Delete rule", show=False),
         Binding("c", "clear_history", "Clear closed", show=False),
         Binding("k", "kill_connection", "Kill"),
-        Binding("7", "show_tab('tab-intel')", "Intel"),
+        Binding("7", "show_tab('tab-intel')", "Intel", show=False),
+        Binding("8", "show_tab('tab-alerts')", "Alerts", show=False),
+        Binding("9", "show_tab('tab-hist')", "History", show=False),
+        Binding("question_mark", "help", "Help"),
+        Binding("A", "ack_alerts", "Acknowledge", show=False),
+        Binding("left_square_bracket", "hist_window(-1)", "Shorter",
+                show=False),
+        Binding("right_square_bracket", "hist_window(1)", "Longer",
+                show=False),
+        Binding("exclamation_mark", "hist_flagged", "Flagged only",
+                show=False),
         Binding("i", "investigate", "Check TI"),
         Binding("w", "export_report", "Write report", show=False),
         Binding("R", "refresh_feeds", "Refresh feeds", show=False),
-        Binding("t", "toggle_tcp", "TCP"),
-        Binding("u", "toggle_udp", "UDP"),
-        Binding("e", "toggle_established", "Estab"),
-        Binding("l", "toggle_listening", "Listen"),
-        Binding("p", "toggle_private", "Public"),
+        Binding("t", "toggle_tcp", "TCP", show=False),
+        Binding("u", "toggle_udp", "UDP", show=False),
+        Binding("e", "toggle_established", "Estab", show=False),
+        Binding("l", "toggle_listening", "Listen", show=False),
+        Binding("p", "toggle_private", "Public", show=False),
         Binding("slash", "search", "Search"),
-        Binding("s", "cycle_sort", "Sort"),
-        Binding("space", "toggle_pause", "Pause"),
+        Binding("s", "cycle_sort", "Sort", show=False),
+        Binding("space", "toggle_pause", "Pause", show=False),
         Binding("r", "reverse_sort", "Reverse", show=False),
         Binding("a", "toggle_arcs", "Arcs", show=False),
         Binding("n", "cycle_nic", "Next row", show=False),
@@ -386,9 +465,15 @@ class NetMonGuruApp(App):
         self.seen = SeenIndex()
         self.watchlist = WatchList(rules_path)
         self.tracker = WatchTracker(self.watchlist)
-        self.cutter = make_cutter()
+        self.cutter = monitor.cutter
         self.ti = monitor.ti
         self.intel_rows: List = []
+        self.alert_rows: List = []
+        self.block_rows: List = []
+        self.hist_rows: List = []
+        self.hist_window = 1
+        self.hist_flagged = False
+        self._proc_ctx: Dict[int, tuple] = {}
         self.proc_detail_open = False
         self.proc_detail_row: Optional[ProcRow] = None
         self.proc_detail_conns: List[Tuple[str, Connection]] = []
@@ -415,6 +500,12 @@ class NetMonGuruApp(App):
         self.search_term = ""
         self.sort_idx = 0
         self.sort_reverse = False
+        general = monitor.config.section("general")
+        self.show_listening = bool(general["show_listening"])
+        self.show_private = bool(general["show_private"])
+        wanted = str(general["sort"]).lower()
+        self.sort_idx = next((i for i, (k, _) in enumerate(SORTS)
+                              if k == wanted), 0)
         self.bw_view = bw_view if bw_view in BW_VIEWS else "processes"
         self.bw_process: Optional[Tuple[Optional[int], str]] = None  # drill-down
         self.bw_keys: List[str] = []
@@ -519,13 +610,33 @@ class NetMonGuruApp(App):
                                         cursor_type="row")
                     with VerticalScroll(id="intel-scroll"):
                         yield Static("", id="intel-report")
+            with TabPane("Alerts", id="tab-alerts"):
+                yield Static("", id="alert-status")
+                yield Static(" ALERTS", id="alert-title", classes="pane-title")
+                yield ClickTable(id="alert-table", zebra_stripes=True,
+                                 cursor_type="row")
+                yield Static(" BLOCKED HOSTS", id="block-title",
+                             classes="pane-title")
+                yield DataTable(id="block-table", zebra_stripes=True,
+                                cursor_type="row")
+            with TabPane("History", id="tab-hist"):
+                yield Static("", id="hist-status")
+                yield DataTable(id="hist-table", zebra_stripes=True,
+                                cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = "NetMonGuru"
         self._columns("#conn-table", "  ", "AGE", "TI", "PROTO", "STATE",
-                      "PID", "PROCESS", "SIG", "LOCAL", "REMOTE",
-                      "HOST / ORG", "LOCATION")
+                      "PID", "PROCESS", "SIG", "▼ DOWN", "▲ UP", "LOCAL",
+                      "REMOTE", "HOST / ORG", "LOCATION")
+        self._columns("#alert-table", "TIME", "SEV", "KIND", "SUBJECT",
+                      "DETAIL")
+        self._columns("#block-table", "ADDRESS", "HOST", "REASON", "BY",
+                      "ADDED", "STATE")
+        self._columns("#hist-table", "STARTED", "DURATION", " ", "PROTO",
+                      "PROCESS", "PID", "REMOTE", "HOST", "ORG", "CC", "TI",
+                      "SIG", "RECV", "SENT")
         self._columns("#intel-list", "TIME", "TARGET", "VERDICT", "PROCESS")
         self._columns("#intel-feeds", "FEED", "STATUS", "ENTRIES", "AGE")
         self._columns("#cd-procs", "REL", "PID", "PROCESS", "DOWN", "UP",
@@ -537,20 +648,20 @@ class NetMonGuruApp(App):
                       "LOCAL", "REMOTE", "HOST", "LOCATION", "FIRST SEEN",
                       "DURATION")
         gt = self.query_one("#geo-table", DataTable)
-        for label, w in ((" ", 1), ("LOCATION", 22), ("ORG", 14), ("N", 3)):
-            gt.add_column(label, width=w)
-        md = self.query_one("#map-detail", DataTable)
-        md.add_columns("PROTO", "STATE", "PID", "PROCESS", "LOCAL",
-                       "REMOTE", "HOSTNAME")
+        self._cols[gt.id] = [gt.add_column(label, width=w) for label, w in
+                             ((" ", 1), ("LOCATION", 22), ("ORG", 14),
+                              ("N", 3))]
+        self._columns("#map-detail", "PROTO", "STATE", "PID", "PROCESS",
+                      "LOCAL", "REMOTE", "HOSTNAME")
         self._columns("#proc-table", "PID", "PROCESS", "TI", "SIG", "DOWN",
                       "UP", "IN", "OUT", "SOCKETS", "ESTAB", "PEERS",
                       "LISTENING")
         self._columns("#pd-conns", "TI", "PROTO", "STATE", "REMOTE", "HOST",
                       "LOCATION", "DOWN", "UP")
-        dl = self.query_one("#dns-live", DataTable)
-        dl.add_columns("TIME", "SRC", "CLIENT", "TYPE", "QUERY", "ANSWERS")
-        dc = self.query_one("#dns-cache", DataTable)
-        dc.add_columns("NAME", "ADDRESSES", "HITS", "AGE", "TTL")
+        self._columns("#dns-live", "TIME", "SRC", "CLIENT", "TYPE", "TI",
+                      "QUERY", "ANSWERS")
+        self._columns("#dns-cache", "NAME", "TI", "ADDRESSES", "HITS", "AGE",
+                      "TTL")
 
         self.query_one("#conn-table", DataTable).focus()
         self.monitor.start()
@@ -700,6 +811,11 @@ class NetMonGuruApp(App):
             self._render_monitor()
         elif active == "tab-intel":
             self._render_intel()
+        elif active == "tab-alerts":
+            self._render_alerts()
+        elif active == "tab-hist":
+            if fresh:
+                self._render_history()
 
     def _notify(self, message: str, seconds: float = 4.0) -> None:
         self.flash = message
@@ -790,8 +906,11 @@ class NetMonGuruApp(App):
         self.rows = [c for _, c in shown]
         self.row_keys = [k for k, _ in shown]
 
+        flows = {(f.proto, f.lport, f.raddr, f.rport): f
+                 for f in self.snapshot.flows.values()}
         items = []
         for key, c in shown:
+            flow = flows.get((c.proto, c.lport, c.raddr, c.rport))
             is_new = self.seen.is_new(key, now)
             monitored = bool(len(self.watchlist)) and bool(
                 self.watchlist.match(c, self._hostname(c.raddr)))
@@ -819,6 +938,10 @@ class NetMonGuruApp(App):
                 Text(c.pname[:22],
                      style="bold #5fff87" if is_new else "#e6edf3"),
                 sig_cell,
+                Text(f"{human_rate(flow.in_rate):>9}" if flow and flow.in_rate
+                     else "", style="#5fd7ff"),
+                Text(f"{human_rate(flow.out_rate):>9}"
+                     if flow and flow.out_rate else "", style="#ffaf5f"),
                 Text(c.local, style="#9fb0c0"),
                 Text(c.remote, style="#c8d3de" if c.raddr else "#4a5a6a"),
                 Text(self._hostname(c.raddr)[:36], style="#7fb3d5"),
@@ -1115,23 +1238,23 @@ class NetMonGuruApp(App):
             home = (h.lat, h.lon)
         world.update_points(points, home)
 
-        cursor = table.cursor_row
-        table.clear()
-        for p in points:
-            table.add_row(Text(p.size_marker(), style=p.color),
-                          Text(p.label[:20], style="#e6edf3"),
-                          Text((p.detail or "-")[:13], style="#7fb3d5"),
-                          Text(str(p.count), style="#5fff87"))
-        if points:
-            self._syncing_geo = True
-            try:
-                target = world.selected if world.selected >= 0 else (cursor or 0)
-                table.move_cursor(row=min(max(target, 0), len(points) - 1))
-            finally:
-                self._syncing_geo = False
-        else:
-            table.add_row("", Text("no located peers yet", style="#4a5a6a"),
-                          "", "")
+        items = [(f"{p.lat:.1f},{p.lon:.1f}", [
+            Text(p.size_marker(), style=p.color),
+            Text(p.label[:20], style="#e6edf3"),
+            Text((p.detail or "-")[:13], style="#7fb3d5"),
+            Text(str(p.count), style="#5fff87")]) for p in points]
+        if not items:
+            items = [("none", [Text(""), Text("no located peers yet",
+                                              style="#4a5a6a"),
+                               Text(""), Text("")])]
+        self._syncing_geo = True
+        try:
+            self._sync_table(table, items)
+            if points and 0 <= world.selected < len(points) \
+                    and world.selected != table.cursor_row:
+                table.move_cursor(row=world.selected, scroll=False)
+        finally:
+            self._syncing_geo = False
         self._render_map_detail()
 
     def _render_map_detail(self) -> None:
@@ -1142,8 +1265,8 @@ class NetMonGuruApp(App):
             return
         idx = world.selected
 
-        table.clear()
         if idx < 0 or idx >= len(self.map_points):
+            self._sync_table(table, [])
             self.map_detail_rows = []
             head.update(Text("click a marker on the map (or pick a row on the "
                              "right) to expand its connections",
@@ -1174,15 +1297,15 @@ class NetMonGuruApp(App):
             t.append(f"   processes: {', '.join(procs[:6])}", style="#7fb3d5")
         head.update(t)
 
-        for c in rows:
-            table.add_row(
-                _proto_text(c),
-                _state_text(c),
-                Text(str(c.pid or "-"), style="#7a8a99"),
-                Text(c.pname[:22], style="#e6edf3"),
-                Text(c.local, style="#9fb0c0"),
-                Text(c.remote, style="#c8d3de"),
-                Text(self._hostname(c.raddr)[:44], style="#7fb3d5"))
+        self._sync_table(table, [(key, [
+            _proto_text(c),
+            _state_text(c),
+            Text(str(c.pid or "-"), style="#7a8a99"),
+            Text(c.pname[:22], style="#e6edf3"),
+            Text(c.local, style="#9fb0c0"),
+            Text(c.remote, style="#c8d3de"),
+            Text(self._hostname(c.raddr)[:44], style="#7fb3d5")])
+            for key, c in unique_keys(rows)])
 
     def on_world_map_point_selected(self, event: WorldMap.PointSelected
                                     ) -> None:
@@ -1459,6 +1582,22 @@ class NetMonGuruApp(App):
         return "", "…" if any(v.abuse_state == "pending"
                               for v in seen.values()) else ""
 
+    def _process_context(self, pid: Optional[int]):
+        """Process tree + launchd persistence (cheap part only), cached 15 s."""
+        if not pid:
+            return None
+        cached = self._proc_ctx.get(pid)
+        if cached and time.monotonic() - cached[0] < 15:
+            return cached[1]
+        try:
+            ctx = self.monitor.macctx.collect(pid)
+        except Exception:                              # noqa: BLE001
+            return None
+        if len(self._proc_ctx) > 200:
+            self._proc_ctx.clear()
+        self._proc_ctx[pid] = (time.monotonic(), ctx)
+        return ctx
+
     def _current_proc(self) -> Optional[ProcRow]:
         table = self._find("#proc-table", DataTable)
         if table is None or not self.proc_rows:
@@ -1542,6 +1681,18 @@ class NetMonGuruApp(App):
                      "bold #ffaf5f")
             if sig.error:
                 line(t, "", sig.error, "#7a8a99")
+        ctx = self._process_context(r.pid)
+        if ctx is not None:
+            if ctx.tree:
+                line(t, "tree", ctx.tree_text[-150:], "#9fb0c0")
+            if ctx.persistence:
+                for item in ctx.persistence[:2]:
+                    line(t, "persists", item.describe()[:150], "#ffd75f")
+            elif r.pid:
+                line(t, "persists", "no autostart entry starts this binary",
+                     "#7a8a99")
+            for note in ctx.notes[:1]:
+                line(t, "", note[:150], "#ffaf5f")
         line(t, "traffic", f"▼ {human_rate(r.in_rate)}  ▲ "
                            f"{human_rate(r.out_rate)}", "#c8d3de",
              f"total in {human_bytes(r.bytes_in)} / out "
@@ -1746,37 +1897,55 @@ class NetMonGuruApp(App):
             f"resolutions per {bucket}s  (peak {int(max(series or [0]))})",
             series)
 
-        live.clear()
+        labels = self.monitor.dns_labels
         rows = [r for r in cache.recent(400)
-                if self._dns_match(f"{r.name} {r.client} {r.answer_text}")]
+                if self._dns_match(f"{r.name} {r.client} {r.answer_text} "
+                                   f"{labels.get(r.name, '')}")]
         self.dns_rows = rows
+
+        def ti_cell(name: str) -> Text:
+            label = labels.get(name, "")
+            if not label:
+                return Text("")
+            style = LEVEL_STYLES["info"] if label == "DGA?" \
+                else LEVEL_STYLES["malicious"]
+            return Text(f" {label[:20]} ", style=style)
+
+        items, seen = [], {}
         for rec in rows[:250]:
-            live.add_row(
+            key = f"{rec.ts:.4f}|{rec.name}|{rec.rtype}|{rec.answer_text}"
+            n = seen.get(key, 0)
+            seen[key] = n + 1
+            items.append((key if not n else f"{key}#{n}", [
                 Text(time.strftime("%H:%M:%S", time.localtime(rec.ts)),
                      style="#7a8a99"),
                 Text(rec.source[:4],
                      style=SOURCE_STYLES.get(rec.source, "#c0c0c0")),
                 Text((rec.client or "-")[:18], style="#e6edf3"),
                 Text(rec.rtype, style="#d7afff"),
+                ti_cell(rec.name),
                 Text(rec.name[:46], style="#7fb3d5"),
-                Text(rec.answer_text[:40], style="#c6a15b"))
+                Text(rec.answer_text[:40], style="#c6a15b")]))
+        self._sync_table(live, items)
 
-        cursor = cache_table.cursor_row
-        cache_table.clear()
         entries = [e for e in cache.entries()
-                   if self._dns_match(f"{e.name} {e.address_text}")]
+                   if self._dns_match(f"{e.name} {e.address_text} "
+                                      f"{labels.get(e.name, '')}")]
         self.dns_cache_rows = entries
         title.update(f" CACHE — last {window_min} min "
                      f"({len(entries)} names)")
-        for e in entries[:400]:
-            cache_table.add_row(
-                Text(e.name[:34], style="#e6edf3"),
-                Text(e.address_text[:30], style="#c6a15b"),
-                Text(str(e.hits), style="#5fff87"),
-                Text(_ago(e.last_seen), style="#7a8a99"),
-                Text(str(e.ttl) if e.ttl else "-", style="#4a5a6a"))
-        if cursor and cache_table.row_count:
-            cache_table.move_cursor(row=min(cursor, cache_table.row_count - 1))
+        now = time.time()
+        self._sync_table(cache_table, [(e.name, [
+            Text(e.name[:34], style="#e6edf3"),
+            ti_cell(e.name),
+            Text(e.address_text[:30], style="#c6a15b"),
+            Text(str(e.hits), style="#5fff87"),
+            # minute granularity once it is old: a column that changes every
+            # second in every row would repaint the whole table each tick
+            Text(_ago(e.last_seen) if now - e.last_seen < 60
+                 else _coarse_age(e.last_seen, now), style="#7a8a99"),
+            Text(str(e.ttl) if e.ttl else "-", style="#4a5a6a")])
+            for e in entries[:400]])
 
     # -- summary -----------------------------------------------------------
     def _render_summary(self) -> None:
@@ -1824,6 +1993,16 @@ class NetMonGuruApp(App):
             live = sum(1 for e in self.tracker.entries.values()
                        if not e.closed)
             t.append(f"   ◉ {live}", style="#ff87d7")
+        unack = self.monitor.alerts.unacknowledged
+        if unack:
+            worst = max((SEVERITY_RANK_UI.get(a.severity, 0)
+                         for a in self.monitor.alerts.snapshot()
+                         if not a.acknowledged), default=0)
+            t.append(f"   ▲ {unack} alert(s) — 8 ",
+                     style="bold #ffffff on #d70000" if worst >= 3
+                     else "bold #06090c on #ffaf5f")
+        if len(self.monitor.blocklist):
+            t.append(f"   ⛔ {len(self.monitor.blocklist)}", style="#ff5f5f")
         if self.flash and time.time() < self._flash_until:
             t.append(f"   {self.flash} ", style="bold #06090c on #ffd75f")
         bar.update(t)
@@ -1864,6 +2043,8 @@ class NetMonGuruApp(App):
             self._set_detail(True)
         elif table_id == "bw-table":
             self._bw_drill(event.cursor_row)
+        elif table_id == "alert-table":
+            self._goto_alert(event.cursor_row)
         elif table_id == "proc-table":
             self._set_proc_detail(True)
         elif table_id == "pd-conns":
@@ -1902,6 +2083,11 @@ class NetMonGuruApp(App):
         self._render_dns()
         self._render_bandwidth()
         self._render_processes()
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is not None and tabs.active == "tab-alerts":
+            self._render_alerts()
+        elif tabs is not None and tabs.active == "tab-hist":
+            self._render_history()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "intel-input":
@@ -1992,6 +2178,244 @@ class NetMonGuruApp(App):
         self._notify(f"monitor: +{added} rule(s), {len(self.watchlist)} total"
                      if added else "monitor: already monitored")
         self.action_show_tab("tab-mon")
+
+    # -- alerts ----------------------------------------------------------------
+    def _render_alerts(self) -> None:
+        status = self._find("#alert-status", Static)
+        table = self._find("#alert-table", DataTable)
+        blocks = self._find("#block-table", DataTable)
+        if None in (status, table, blocks):
+            return
+        mon = self.monitor
+        engine = mon.alerts
+        now = time.time()
+        rows = [a for a in engine.snapshot()
+                if not self.search_term or self.search_term.lower() in
+                f"{a.kind} {a.subject} {a.detail} {a.pname}".lower()]
+        self.alert_rows = rows
+
+        t = Text()
+        if not engine.enabled:
+            t.append(" alerting is off ", style="bold #ffaf5f")
+        else:
+            t.append(f" {engine.unacknowledged} new ", style="bold #ff5f5f"
+                     if engine.unacknowledged else "#5f875f")
+            t.append(f" {len(rows)} shown", style="#c8d3de")
+        t.append(f"   baseline: {engine.baseline.status()}", style="#9fb0c0")
+        j = mon.journal
+        t.append("   journal: " + ("on" if j is not None and j.enabled
+                                   else "off"), style="#9fb0c0")
+        t.append("   enter: go to   i: investigate   A: acknowledge all   "
+                 "tab → d: unblock", style="#4a5a6a")
+        err = mon.alerts_error or (j.error if j is not None else "")
+        if err:
+            t.append(f"   ! {err[:60]}", style="#ff5f5f")
+        status.update(t)
+
+        items = []
+        for a in rows[:400]:
+            dim = a.acknowledged
+            items.append((f"{a.ts:.4f}|{a.dedup}", [
+                Text(time.strftime("%H:%M:%S", time.localtime(a.ts)),
+                     style="#7a8a99"),
+                Text(f" {a.severity.upper()} ", style="#4a5a6a" if dim
+                     else SEVERITY_STYLES.get(a.severity, "")),
+                Text(a.kind, style="#7a8a99" if dim else "#7fb3d5"),
+                Text(a.subject[:60], style="#7a8a99" if dim
+                     else "bold #e6edf3"),
+                Text(a.detail[:110], style="#5a6a7a" if dim else "#9fb0c0")]))
+        self._sync_table(table, items)
+        title = self._find("#alert-title", Static)
+        if title is not None:
+            title.update(f" ALERTS ({len(rows)})" + (
+                f" — filter /{self.search_term}" if self.search_term else ""))
+
+        self.block_rows = list(mon.blocklist.entries)
+        enforced = set(mon.cutter.blocked)
+        self._sync_table(blocks, [(e.ip, [
+            Text(e.ip, style="bold #ff5f5f"),
+            Text((e.host or "-")[:34], style="#7fb3d5"),
+            Text((e.reason or "-")[:40], style="#c6a15b"),
+            Text(e.by, style="#9fb0c0"),
+            Text(_coarse_age(e.added, now) + " ago", style="#7a8a99"),
+            Text("enforced" if e.ip in enforced else "NOT enforced",
+                 style="#5fff87" if e.ip in enforced else "bold #ffaf5f")])
+            for e in self.block_rows])
+        btitle = self._find("#block-title", Static)
+        if btitle is not None:
+            btitle.update(f" BLOCKED HOSTS ({len(self.block_rows)})" + (
+                f" — {mon.block_status}" if mon.block_status else "")
+                + ("" if mon.cutter.available or not self.block_rows
+                   else "  (run as Administrator to enforce)"))
+
+    def action_ack_alerts(self) -> None:
+        self.monitor.alerts.acknowledge_all()
+        self._render_summary()
+        self._render_alerts()
+
+    def _goto_alert(self, row: int) -> None:
+        if not 0 <= row < len(self.alert_rows):
+            return
+        a = self.alert_rows[row]
+        a.acknowledged = True
+        if a.raddr:
+            for key, c in self.keyed:
+                if c.raddr == a.raddr and (not a.rport or c.rport == a.rport):
+                    self.action_show_tab("tab-conn")
+                    table = self._find("#conn-table", DataTable)
+                    if table is not None and self._cursor_to_key(table, key):
+                        self._set_detail(True)
+                        return
+        if a.pid or a.pname:
+            self._goto_process(ProcRow(pid=a.pid, name=a.pname or "?"))
+            return
+        self._notify("nothing live to show for this alert - see History (9)")
+
+    def _block(self, ip: str, host: str, reason: str) -> None:
+        mon = self.monitor
+        try:
+            added = mon.blocklist.add(ip, host, reason)
+        except ValueError:
+            self._notify(f"✗ not an address: {ip}")
+            return
+        message = mon.apply_blocklist()
+        self._notify(("✓ blocked " if added else "already blocked: ") + ip
+                     + (f" — {message}" if message else ""), 8.0)
+
+    def _unblock_selected(self) -> None:
+        table = self._find("#block-table", DataTable)
+        if table is None or not 0 <= table.cursor_row < len(self.block_rows):
+            self._notify("select a blocked host first (tab)")
+            return
+        ip = self.block_rows[table.cursor_row].ip
+        self.monitor.blocklist.remove(ip)
+        message = self.monitor.apply_blocklist()
+        self._notify(f"✓ unblocked {ip}" + (f" — {message}" if message
+                                            else ""), 6.0)
+        self._render_alerts()
+
+    # -- history -----------------------------------------------------------------
+    def _render_history(self) -> None:
+        status = self._find("#hist-status", Static)
+        table = self._find("#hist-table", DataTable)
+        if status is None or table is None:
+            return
+        j = self.monitor.journal
+        t = Text()
+        if j is None or not j.enabled:
+            t.append(" the journal is off ", style="bold #ffaf5f")
+            t.append(" (--no-journal, journal.enabled = false, or --demo)"
+                     + (f" — {j.error}" if j is not None and j.error else ""),
+                     style="#7a8a99")
+            status.update(t)
+            self.hist_rows = []
+            self._sync_table(table, [])
+            return
+        from ..core.journal import parse_since
+
+        label, span = HISTORY_WINDOWS[self.hist_window]
+        rows = j.connections(parse_since(span), self.search_term,
+                             self.hist_flagged, 600)
+        self.hist_rows = rows
+        for i, (name, _) in enumerate(HISTORY_WINDOWS):
+            t.append(f" {name} ", style="bold #06090c on #5fd7ff"
+                     if i == self.hist_window else "#4a5a6a")
+            t.append(" ")
+        t.append(" [ ]: window ", style="#4a5a6a")
+        t.append(" FLAGGED ONLY " if self.hist_flagged else " !: flagged only ",
+                 style="bold #06090c on #ffaf5f" if self.hist_flagged
+                 else "#4a5a6a")
+        if self.search_term:
+            t.append(f" /{self.search_term} ", style="bold #ffd75f")
+        stats = j.stats()
+        t.append(f"  {len(rows)} shown", style="#c8d3de")
+        t.append(f"   journal: {stats['connections']} connections, "
+                 f"{stats['alerts']} alerts, {stats['dns']} DNS answers, "
+                 f"{human_bytes(stats['bytes'])}   w: export CSV   "
+                 "i: investigate", style="#4a5a6a")
+        status.update(t)
+
+        now = time.time()
+        items = []
+        for r in rows:
+            closed = bool(r["closed"])
+            base = "#7a8a99" if closed else None
+            level = r["ti_level"] or ""
+            day = time.strftime("%m-%d ", time.localtime(r["first_seen"])) \
+                if now - r["first_seen"] > 86400 else ""
+            remote = (f"{r['raddr']}:{r['rport']}" if r["raddr"]
+                      else f"(listen :{r['lport']})")
+            items.append((str(r["id"]), [
+                Text(day + time.strftime("%H:%M:%S",
+                                         time.localtime(r["first_seen"])),
+                     style="#9fb0c0"),
+                Text(_span(r["last_seen"] - r["first_seen"]),
+                     style=base or "#c8d3de"),
+                Text("✕" if closed else "●",
+                     style="#5a6a7a" if closed else "#5fff87"),
+                Text(r["proto"] or "", style=base or "#87d7ff"),
+                Text((r["pname"] or "?")[:20], style=base or "#e6edf3"),
+                Text(str(r["pid"] or "-"), style="#7a8a99"),
+                Text(remote, style=base or "#c8d3de"),
+                Text((r["host"] or "")[:30], style=base or "#7fb3d5"),
+                Text((r["org"] or "")[:20], style=base or "#c6a15b"),
+                Text(r["country"] or "", style=base or "#c6a15b"),
+                Text(f" {(r['ti_label'] or '')[:20]} " if r["ti_label"]
+                     else "", style=LEVEL_STYLES.get(level, "#4a5a6a")),
+                Text(r["sig"] or "", style=SIG_STYLES.get(r["sig"] or "",
+                                                          "#4a5a6a")),
+                Text(human_bytes(r["bytes_in"]) if r["bytes_in"] else "",
+                     style="#5fd7ff"),
+                Text(human_bytes(r["bytes_out"]) if r["bytes_out"] else "",
+                     style="#ffaf5f")]))
+        self._sync_table(table, items)
+
+    def action_hist_window(self, step: int) -> None:
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is None or tabs.active != "tab-hist":
+            return
+        self.hist_window = min(len(HISTORY_WINDOWS) - 1,
+                               max(0, self.hist_window + int(step)))
+        self._render_history()
+
+    def action_hist_flagged(self) -> None:
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is None or tabs.active != "tab-hist":
+            return
+        self.hist_flagged = not self.hist_flagged
+        self._render_history()
+
+    def _export_history(self) -> None:
+        j = self.monitor.journal
+        if j is None or not j.enabled or not self.hist_rows:
+            self._notify("nothing to export")
+            return
+        import csv
+        from pathlib import Path
+        from ..core.util import give_back
+
+        folder = Path.home() / "netmonguru-reports"
+        target = folder / time.strftime("history-%Y%m%d-%H%M%S.csv")
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                cols = [k for k in self.hist_rows[0].keys() if k != "id"]
+                w = csv.writer(fh)
+                w.writerow(cols + ["first_seen_iso", "duration_s"])
+                for r in self.hist_rows:
+                    w.writerow([r[c] for c in cols] + [
+                        time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                      time.localtime(r["first_seen"])),
+                        round(r["last_seen"] - r["first_seen"], 1)])
+            give_back(target)
+            self._notify(f"✓ {len(self.hist_rows)} rows → {target}", 8.0)
+        except Exception as exc:                       # noqa: BLE001
+            self._notify(f"✗ export failed: {exc}"[:80], 8.0)
+
+    def action_help(self) -> None:
+        tabs = self._find("#tabs", TabbedContent)
+        self.push_screen(HelpScreen(tabs.active if tabs is not None
+                                    else "tab-conn"))
 
     # -- threat intelligence -------------------------------------------------
     def _render_intel(self) -> None:
@@ -2152,6 +2576,30 @@ class NetMonGuruApp(App):
                 fact("sha-256", p.sha256)
             if p.error:
                 fact("note", p.error, "#7a8a99")
+        if r.proc_ctx is not None:
+            x = r.proc_ctx
+            head("PROCESS CONTEXT")
+            fact("process tree", x.tree_text or "-")
+            if x.children:
+                fact("children", ", ".join(f"{n} ({p})"
+                                           for p, n in x.children))
+            if x.persistence:
+                for item in x.persistence:
+                    fact("persistence", item.describe(), "#ffd75f")
+            else:
+                fact("persistence", "no autostart entry starts this binary",
+                     "#7a8a99")
+            if x.hardened is not None:
+                fact("hardened runtime", "yes" if x.hardened else "NO",
+                     "#5fff87" if x.hardened else "bold #ffaf5f")
+            if x.sandboxed is not None:
+                fact("app sandbox", "yes" if x.sandboxed else "no")
+            for e in x.entitlements:
+                fact("entitlement", e, "#ffd75f")
+            for n in x.notes:
+                fact("note", n, "#ffaf5f")
+            for i, f in enumerate(x.open_files[:25]):
+                fact("open files" if i == 0 else "", f, "#9fb0c0")
 
         for kind, title in (("ti", "THREAT INTELLIGENCE"),
                             ("process", "PROCESS REPUTATION"),
@@ -2327,6 +2775,9 @@ class NetMonGuruApp(App):
 
     def action_export_report(self) -> None:
         tabs = self._find("#tabs", TabbedContent)
+        if tabs is not None and tabs.active == "tab-hist":
+            self._export_history()
+            return
         if tabs is None or tabs.active != "tab-intel":
             return
         r = self._selected_report()
@@ -2355,6 +2806,33 @@ class NetMonGuruApp(App):
             if table is not None and 0 <= table.cursor_row < len(self.mon_rows):
                 entry = self.mon_rows[table.cursor_row]
                 return None if entry.closed else entry.conn
+        if active == "tab-alerts":
+            table = self._find("#alert-table", DataTable)
+            if table is not None and \
+                    0 <= table.cursor_row < len(self.alert_rows):
+                a = self.alert_rows[table.cursor_row]
+                if a.raddr:
+                    live = next((c for _, c in self.keyed
+                                 if c.raddr == a.raddr), None)
+                    return live or Connection(
+                        proto="TCP", family="IPv6" if ":" in a.raddr
+                        else "IPv4", raddr=a.raddr, rport=a.rport,
+                        pid=a.pid, pname=a.pname)
+            return None
+        if active == "tab-hist":
+            table = self._find("#hist-table", DataTable)
+            if table is not None and \
+                    0 <= table.cursor_row < len(self.hist_rows):
+                r = self.hist_rows[table.cursor_row]
+                if r["raddr"]:
+                    return Connection(
+                        proto=r["proto"] or "TCP", family=r["family"] or "",
+                        laddr=r["laddr"] or "", lport=r["lport"] or 0,
+                        raddr=r["raddr"], rport=r["rport"] or 0,
+                        state="" if r["closed"] else (r["state"] or ""),
+                        pid=None if r["closed"] else r["pid"],
+                        pname=r["pname"] or "")
+            return None
         if active == "tab-proc":
             table = self._find("#pd-conns", DataTable)
             if table is not None and table.has_focus and \
@@ -2392,11 +2870,18 @@ class NetMonGuruApp(App):
         sockets = sum(1 for o in self.snapshot.connections
                       if c.pid is not None and o.pid == c.pid)
         self.push_screen(
-            KillScreen(c, self._hostname(c.raddr), sockets, cut_error),
+            KillScreen(c, self._hostname(c.raddr), sockets, cut_error,
+                       self.cutter.why_not, c.raddr in self.monitor.blocklist),
             lambda choice: self._do_kill(c, choice))
 
     def _do_kill(self, c: Connection, choice: Optional[str]) -> None:
         if not choice:
+            return
+        if choice == "block":
+            v = self.snapshot.ti.get(c.raddr)
+            self._block(c.raddr, self._hostname(c.raddr),
+                        (v.label if v is not None and v.label else "")
+                        or f"blocked from {c.pname or 'a connection'}")
             return
         if choice == "cut":
             ok, message = self.cutter.cut(c)
@@ -2406,6 +2891,9 @@ class NetMonGuruApp(App):
 
     def action_delete_rule(self) -> None:
         tabs = self._find("#tabs", TabbedContent)
+        if tabs is not None and tabs.active == "tab-alerts":
+            self._unblock_selected()
+            return
         rules = self._find("#mon-rules", DataTable)
         if tabs is None or rules is None or tabs.active != "tab-mon":
             return
@@ -2574,9 +3062,15 @@ class NetMonGuruApp(App):
         active = self.query_one("#tabs", TabbedContent).active
         focus_id = {"tab-dns": "#dns-live", "tab-intel": "#intel-list",
                     "tab-bw": "#bw-table", "tab-proc": "#proc-table",
+                    "tab-alerts": "#alert-table", "tab-hist": "#hist-table",
                     "tab-mon": "#mon-table"}.get(active, "#conn-table")
         self.query_one(focus_id, DataTable).focus()
         self._render_connections()
         self._render_dns()
         self._render_bandwidth()
         self._render_processes()
+        tabs = self._find("#tabs", TabbedContent)
+        if tabs is not None and tabs.active == "tab-alerts":
+            self._render_alerts()
+        elif tabs is not None and tabs.active == "tab-hist":
+            self._render_history()

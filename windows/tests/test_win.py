@@ -246,3 +246,102 @@ class TestWhois(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWin16(unittest.TestCase):
+    """1.6 on Windows: autostart index, firewall blocking, toasts, folders."""
+
+    def test_command_exe(self):
+        from netmonguru.core.win_ctx import command_exe
+        self.assertEqual(command_exe(r'"C:\Program Files\App\app.exe" --min'),
+                         r"C:\Program Files\App\app.exe")
+        self.assertEqual(command_exe(r"C:\Program Files\App\app.exe /tray"),
+                         r"C:\Program Files\App\app.exe")
+        self.assertEqual(command_exe(r"C:\Windows\system32\svchost.exe -k x"),
+                         r"C:\Windows\system32\svchost.exe")
+        self.assertEqual(command_exe(""), "")
+
+    def test_schtasks_csv(self):
+        from netmonguru.core.win_ctx import parse_schtasks
+        text = ('"HostName","TaskName","Next Run Time","Status","Task To Run"\n'
+                '"PC","\\Updater","N/A","Ready",'
+                '"C:\\Users\\p\\AppData\\Local\\Temp\\upd.exe /s"\n'
+                '"PC","\\Microsoft\\Windows\\Defrag","N/A","Ready",'
+                '"COM handler"\n'
+                '"HostName","TaskName","Next Run Time","Status","Task To Run"\n'
+                '"PC","\\Updater","N/A","Ready",'
+                '"C:\\Users\\p\\AppData\\Local\\Temp\\upd.exe /s"\n')
+        self.assertEqual(parse_schtasks(text), [
+            ("\\Updater", "C:\\Users\\p\\AppData\\Local\\Temp\\upd.exe /s")])
+
+    def test_autostart_matching(self):
+        from netmonguru.core.macos_ctx import LaunchItem
+        from netmonguru.core.win_ctx import AutostartIndex
+        idx = AutostartIndex()
+        idx._items = [
+            LaunchItem("Updater", "HKCU\\...\\Run", "Run key (this user)",
+                       r"C:\Users\p\AppData\Roaming\upd.exe", True),
+            LaunchItem("Tool.lnk", "Startup", "Startup folder (this user)",
+                       "lnk:tool", True)] + [
+            LaunchItem(f"svc{i}", "service", "Windows service",
+                       r"C:\Windows\System32\svchost.exe") for i in range(9)]
+        idx._stamp = __import__("time").monotonic()
+        hit = idx.for_exe(r"c:\users\p\appdata\roaming\UPD.EXE")
+        self.assertEqual([i.label for i in hit], ["Updater"])
+        self.assertEqual([i.label for i in idx.for_exe(r"D:\x\Tool.exe")],
+                         ["Tool.lnk"])
+        shared = idx.for_exe(r"C:\Windows\System32\svchost.exe")
+        self.assertEqual(len(shared), 2)
+        self.assertIn("8 more services", shared[1].label)
+
+    def test_firewall_blocking(self):
+        calls = []
+
+        def run(cmd, stdin=""):
+            calls.append(cmd[3:])
+            return 0, "Ok."
+        cutter = WinCutter(runner=run, admin=True)
+        ok, msg = cutter.set_blocked(["185.220.101.7"])
+        self.assertTrue(ok, msg)
+        adds = [c for c in calls if c[0] == "add"]
+        self.assertEqual([c[3] for c in adds], ["dir=out", "dir=in"])
+        self.assertIn("remoteip=185.220.101.7", adds[0])
+        self.assertIn("name=NetMonGuru block 185.220.101.7", adds[0])
+        with self.assertRaises(Exception):
+            from netmonguru.core.killer import BlockList
+            BlockList().add("1.2.3.4 remoteip=any")   # no argument injection
+        cutter.set_blocked([])
+        self.assertEqual(calls[-1][:2], ["delete", "rule"])
+        cutter.set_blocked(["185.220.101.7"])
+        cutter.release()
+        self.assertEqual(calls[-1], ["delete", "rule",
+                                     "name=NetMonGuru block 185.220.101.7"])
+
+    def test_keep_on_exit_and_no_admin(self):
+        calls = []
+        keep = WinCutter(runner=lambda c, s="": calls.append(c) or (0, ""),
+                         admin=True, keep_on_exit=True)
+        keep.set_blocked(["1.2.3.4"])
+        n = len(calls)
+        keep.release()
+        self.assertEqual(len(calls), n)
+        plain = WinCutter(runner=lambda c, s="": calls.append(c) or (0, ""),
+                          admin=False)
+        ok, msg = plain.set_blocked(["1.2.3.4"])
+        self.assertFalse(ok)
+        self.assertIn("Administrator", msg)
+
+    def test_toast_script_quotes_user_text(self):
+        from netmonguru.core.alerts import notify_windows
+        calls = []
+        notify_windows("threat", "it's $(bad) `n", popen=lambda cmd, **k:
+                       calls.append(cmd))
+        script = calls[0][-1]
+        self.assertIn("'it''s $(bad) `n'", script)   # single-quoted: inert
+        self.assertIn("ToastNotificationManager", script)
+
+    def test_folders(self):
+        from netmonguru.core.config import config_dir, data_dir
+        self.assertEqual(config_dir(), win.config_dir())
+        self.assertTrue(str(data_dir()).endswith(
+            "data" if win.IS_WINDOWS else "netmonguru"))

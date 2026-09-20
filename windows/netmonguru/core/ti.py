@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import Connection, is_routable
+from .macos_ctx import MacContext, ProcContext
 from .procsig import ProcSig, ProcSigner
 from .ti_feeds import SEVERITY_RANK, FeedHit, FeedStore
 from .util import give_back
@@ -150,6 +151,7 @@ class Report:
     feed_hits: List[FeedHit] = field(default_factory=list)
     sources: Dict[str, SourceResult] = field(default_factory=dict)
     process: Optional[ProcSig] = None
+    proc_ctx: Optional[ProcContext] = None
     context: List[Tuple[str, str]] = field(default_factory=list)
     note: str = ""
     kind: str = "ip"                # ip | process
@@ -240,7 +242,9 @@ class Report:
             "peer_reports": [sub.to_dict() for sub in self.subs],
             "process": {"name": self.pname, "pid": self.pid,
                         **({k: v for k, v in asdict(self.process).items()
-                            if k != "pid"} if self.process else {})},
+                            if k != "pid"} if self.process else {}),
+                        **({"context": asdict(self.proc_ctx)}
+                           if self.proc_ctx else {})},
             "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z",
                                        time.localtime(self.started)),
             "verdict": level, "reasons": reasons,
@@ -278,6 +282,28 @@ class Report:
                     f"- **SHA-256:** `{p.sha256 or '-'}`",
                     f"- **Path flags:** {', '.join(p.path_flags) or 'none'}",
                     ""]
+        if self.proc_ctx is not None:
+            x = self.proc_ctx
+            out += ["## Process context", "",
+                    f"- **Process tree:** {x.tree_text or '-'}"]
+            if x.children:
+                out.append("- **Children:** " + ", ".join(
+                    f"{n} ({p})" for p, n in x.children))
+            out += [f"- **Persistence:** {i.describe()}"
+                    for i in x.persistence] or \
+                ["- **Persistence:** no autostart entry starts this binary"]
+            if x.hardened is not None:
+                out.append(f"- **Hardened runtime:** "
+                           f"{'yes' if x.hardened else 'NO'}")
+            if x.sandboxed is not None:
+                out.append(f"- **App sandbox:** "
+                           f"{'yes' if x.sandboxed else 'no'}")
+            out += [f"- **Entitlement:** {e}" for e in x.entitlements]
+            out += [f"- **Note:** {n}" for n in x.notes]
+            if x.open_files:
+                out += ["", "Open files:", ""] + \
+                    [f"- `{f}`" for f in x.open_files]
+            out.append("")
         for kind, title in (("ti", "Threat intelligence"),
                             ("process", "Process reputation"),
                             ("whois", "WHOIS"), ("osint", "OSINT")):
@@ -333,6 +359,8 @@ class ThreatIntel:
         self.feeds = feed_store if feed_store is not None else (
             FeedStore(keys=keys) if enabled else None)
         self.signer = signer or ProcSigner()
+        from .win_ctx import make_context
+        self.macctx = make_context()
 
         self.verdicts: Dict[str, Verdict] = {}
         self.procsigs: Dict[int, ProcSig] = {}
@@ -346,6 +374,7 @@ class ThreatIntel:
         self._qn = 0
         self._queued: set = set()
         self._pids: Dict[int, str] = {}
+        self._names: Dict[str, str] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._force_feeds = threading.Event()
@@ -418,9 +447,16 @@ class ThreatIntel:
             self._usage = {"day": today, "count": 0}
 
     # -- called by the sampler on every snapshot --------------------------------
-    def submit(self, connections: Iterable[Connection]) -> None:
+    def lookup_domain(self, name: str):
+        if not self.enabled or self.feeds is None:
+            return None
+        return self.feeds.lookup_domain(name)
+
+    def submit(self, connections: Iterable[Connection],
+               names: Optional[Dict[str, str]] = None) -> None:
         if not self.enabled:
             return
+        names = names or {}
         conns = list(connections)
         regen = self.feeds is not None and self.feeds.generation != self._feed_gen
         if regen:
@@ -444,8 +480,21 @@ class ThreatIntel:
                     fresh = True
                 else:
                     fresh = False
-                if (fresh or regen) and self.feeds is not None:
+                name = names.get(ip, "")
+                renamed = name != self._names.get(ip, "")
+                if (fresh or regen or renamed) and self.feeds is not None:
                     v.hits = self.feeds.lookup(ip, port)
+                    self._names[ip] = name
+                    # the address may be clean while the *name* is an IOC
+                    # (C2 behind a CDN or a fresh VPS)
+                    dom = self.feeds.lookup_domain(name) if name else None
+                    if dom is not None and dom.feed != "dga":
+                        dom.detail = f"{name} — {dom.detail}"
+                        v.hits = sorted(
+                            v.hits + [dom],
+                            key=lambda h: -SEVERITY_RANK[h.severity])
+                    if renamed:
+                        v.recompute()
                 if fresh and v.abuse_score is None and self.auto_active \
                         and ip not in self._queued:
                     v.abuse_state = "pending"
@@ -578,6 +627,11 @@ class ThreatIntel:
             except Exception:                           # noqa: BLE001
                 exe = ""
             report.process = self.signer.inspect(report.pid, exe, deep=True)
+            try:
+                report.proc_ctx = self.macctx.collect(report.pid, exe,
+                                                      deep=True)
+            except Exception:                           # noqa: BLE001
+                pass
             if report.process.sha256:
                 report.sources["vt-file"] = virustotal_file(
                     report.process.sha256, ctx)
@@ -658,6 +712,11 @@ class ThreatIntel:
             except Exception:                           # noqa: BLE001
                 exe = ""
             report.process = self.signer.inspect(report.pid, exe, deep=True)
+            try:
+                report.proc_ctx = self.macctx.collect(report.pid, exe,
+                                                      deep=True)
+            except Exception:                           # noqa: BLE001
+                pass
             if "vt-file" in report.sources:
                 if report.process.sha256:
                     report.sources["vt-file"] = virustotal_file(

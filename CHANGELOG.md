@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.6.0 — 2026-09-20  (Windows)
+
+Everything in the macOS 1.6.0 entry below, ported to [`windows/`](windows/):
+
+- Alerts with **toast notifications** (WinRT through PowerShell, no extra
+  package); the `unsigned` rule uses Authenticode and Windows path flags.
+- Journal in `%LOCALAPPDATA%\\netmonguru\\data`, History pane, `--export`,
+  `--record`; `--print-task` prints the `schtasks` command for a windowless
+  recorder at logon (replaces `--print-launchd`).
+- **Host blocking through Windows Firewall** (`netsh advfirewall`, one in +
+  one out rule per host), re-applied on start, removed on exit unless
+  `block.keep_on_exit`.
+- **Process context**: Run / RunOnce keys, Startup folders, services and
+  scheduled tasks that start the binary; process tree with an orphan note;
+  open files.
+- `config.toml`, baseline, blocklist in `%APPDATA%\\netmonguru`.
+- `--doctor` also checks config, journal, autostart index, firewall state and
+  the toast API.
+- Fix (both builds): the journal's read-only connection used a hand-built
+  `file:` URI that breaks on drive letters, spaces, `#` and `?` in the path.
+
 ## 1.6.0 — 2026-09-20  (macOS)
 
 ### Added

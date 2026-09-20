@@ -87,7 +87,7 @@ class TestCutter(unittest.TestCase):
         cutter.release()
         tail = [x[0] for x in fake.calls[-2:]]
         self.assertEqual(tail, [["-a", "com.apple/250.NetMonGuru", "-F",
-                                 "rules"], ["-X", "1234567890"]])
+                                 "all"], ["-X", "1234567890"]])
         self.assertEqual(cutter.rules, [])
 
     def test_failed_load_keeps_state_clean(self):

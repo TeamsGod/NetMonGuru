@@ -109,6 +109,59 @@ def run() -> int:
         return "OK", (", ".join(sorted(keys)) or
                       "none configured - local feeds only")
 
+    def _config():
+        from .core.config import Config
+        cfg = Config.load()
+        if cfg.warnings:
+            return "WARN", "; ".join(cfg.warnings[:3])
+        return "OK", str(cfg.path)
+
+    def _journal():
+        import tempfile
+        from pathlib import Path
+        from .core.journal import Journal, default_path
+        j = Journal(Path(tempfile.mkdtemp()) / "probe.db")
+        if not j.enabled:
+            return "FAIL", j.error
+        j.close()
+        return "OK", f"SQLite journal writable ({default_path()})"
+
+    def _autostart():
+        from .core.win_ctx import AutostartIndex
+        items = AutostartIndex().items()
+        kinds = {}
+        for i in items:
+            kinds[i.scope.split(" (")[0]] = kinds.get(
+                i.scope.split(" (")[0], 0) + 1
+        if not items:
+            return "WARN", "no autostart entries could be read"
+        return "OK", ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
+
+    def _firewall():
+        import shutil
+        if not shutil.which("netsh"):
+            return "FAIL", "netsh not found - host blocking unavailable"
+        code, text = win.powershell(
+            "(Get-NetFirewallProfile | Where-Object Enabled).Name -join ','",
+            20)
+        profiles = text.strip() if code == 0 else "?"
+        if not win.is_admin():
+            return "WARN", (f"firewall profiles on: {profiles}; blocking "
+                            "needs an elevated prompt")
+        if not profiles:
+            return "WARN", ("Windows Firewall is off for every profile - "
+                            "block rules would not be enforced")
+        return "OK", f"netsh present, firewall profiles on: {profiles}"
+
+    def _toast():
+        code, text = win.powershell(
+            "[Windows.UI.Notifications.ToastNotificationManager, "
+            "Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
+            "'ok'", 20)
+        return ("OK", "toast API available") if code == 0 and "ok" in text \
+            else ("WARN", "toast API not available - alerts stay in the app: "
+                          + text.strip()[:80])
+
     def _network():
         from .core.ti_feeds import default_fetch
         raw = default_fetch("https://check.torproject.org/torbulkexitlist",
@@ -129,7 +182,11 @@ def run() -> int:
                      ("TCP statistics", _estats),
                      ("PowerShell", _powershell),
                      ("Authenticode", _authenticode), ("DNS sources", _dns),
-                     ("config / cache folders", _dirs), ("API keys", _keys),
+                     ("config / cache folders", _dirs),
+                     ("config.toml", _config), ("journal", _journal),
+                     ("autostart index", _autostart),
+                     ("firewall (blocking)", _firewall),
+                     ("notifications", _toast), ("API keys", _keys),
                      ("outbound HTTPS", _network)):
         check(name, fn)
 
